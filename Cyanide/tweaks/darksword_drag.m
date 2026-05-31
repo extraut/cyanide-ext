@@ -26,13 +26,11 @@ typedef struct {
 static uint64_t drag_strip_fp(void *p)
 {
     uint64_t v = (uint64_t)p;
+#if defined(__ARM_FEATURE_PAC_ADDRESSES)
     if (v >> 47) {
-#if defined(__has_builtin) && __has_builtin(__builtin_ptrauth_strip)
         v = (uint64_t)__builtin_ptrauth_strip((void *)v, 0);
-#else
-        __asm__ volatile("xpaci %0" : "+r"(v));
-#endif
     }
+#endif
     return v;
 }
 
