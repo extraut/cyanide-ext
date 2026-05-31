@@ -26,10 +26,9 @@ typedef struct {
 static uint64_t drag_strip_fp(void *p)
 {
     uint64_t v = (uint64_t)p;
-#if defined(__ARM_FEATURE_PAC_ADDRESSES)
-    if (v >> 47) {
+#if __has_feature(ptrauth_calls)
+    if (v >> 47)
         v = (uint64_t)__builtin_ptrauth_strip((void *)v, 0);
-    }
 #endif
     return v;
 }
