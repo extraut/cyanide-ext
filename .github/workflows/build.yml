@@ -1,0 +1,63 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild build \
+            -project Cyanide.xcodeproj \
+            -scheme Cyanide \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            ENABLE_BITCODE=NO
+
+      - name: Package IPA
+        run: |
+          APP_PATH=$(find DerivedData -name "Cyanide.app" -not -path "*/Index.noindex/*" | head -1)
+          echo "App: $APP_PATH"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/Cyanide.app
+          zip -qr Cyanide.ipa Payload
+          ls -lh Cyanide.ipa
+
+      - name: Get version
+        id: version
+        run: |
+          VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            DerivedData/Build/Products/Release-iphoneos/Cyanide.app/Info.plist 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            Cyanide/Info.plist)
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER-$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Cyanide ${{ steps.version.outputs.version }}
+          body: "Built from commit ${{ github.sha }}"
+          files: Cyanide.ipa
