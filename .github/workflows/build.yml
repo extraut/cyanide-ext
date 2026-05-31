@@ -21,6 +21,9 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
 
+      - name: Install ldid
+        run: brew install ldid
+
       - name: Build (unsigned)
         run: |
           xcodebuild build \
