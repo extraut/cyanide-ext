@@ -90,31 +90,20 @@ bool darksword_drag_coefficient_apply(double coefficient)
         return false;
     }
 
-    union { double dv; uint64_t u; } b = { .dv = coefficient };
-
-    // Write the coefficient value first.
-    if (!remote_write(d.g + d.valOff, &b.u, 8)) {
-        printf("[DRAG] value write failed\n");
-        return false;
-    }
-
-    // Bump revVar so UIKit invalidates its cached value.
     uint32_t rv = 0;
     remote_read(d.revVar, &rv, 4);
-    uint32_t next = rv + 1;
-    remote_write(d.revVar, &next, 4);
+    if ((int)rv < 1) { uint32_t one = 1; remote_write(d.revVar, &one, 4); rv = 1; }
 
-    // Write the slot-revision sentinel only when the parser found the field.
-    // revOff can be 0 if the W-store instruction wasn't in the scan window;
-    // writing to d.g+0 in that case would corrupt the struct.
-    if (d.revOff) {
-        uint32_t sentinel = 0x7fffffff;
-        remote_write(d.g + d.revOff, &sentinel, 4);
-    }
+    union { double dv; uint64_t u; } b = { .dv = coefficient };
+    uint32_t sentinel = 0x7fffffff;
 
-    double chk = 0;
+    remote_write(d.g + d.revOff, &sentinel, 4);
+    remote_write(d.g + d.valOff, &b.u, 8);
+
+    double chk = 0; uint32_t sr = 0;
     remote_read(d.g + d.valOff, &chk, 8);
-    printf("[DRAG] g=0x%llx valOff=%u revOff=%u value=%.4f\n",
-           (unsigned long long)d.g, d.valOff, d.revOff, chk);
+    remote_read(d.g + d.revOff, &sr, 4);
+    printf("[DRAG] g=0x%llx revVar=%u value=%.4f slotRev=0x%x\n",
+           (unsigned long long)d.g, rv, chk, sr);
     return true;
 }
