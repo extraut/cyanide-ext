@@ -7762,6 +7762,8 @@ void cyanide_present_contact(UIViewController *host)
         iv.contentMode = UIViewContentModeScaleAspectFit;
         iv.alpha = alphaPct / 100.0;
         iv.userInteractionEnabled = YES;
+        iv.layer.cornerRadius = 8.0;
+        iv.clipsToBounds = YES;
         [screen addSubview:iv];
 
         // Drag gesture for repositioning
@@ -7769,17 +7771,9 @@ void cyanide_present_contact(UIViewController *host)
                                        initWithTarget:self
                                                action:@selector(pictureOverlayPreviewPanned:)];
         [iv addGestureRecognizer:pan];
-
-        // Hint label
-        UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, screenH + 12, screenW, 16)];
-        hint.text = @"Drag image to position";
-        hint.font = [UIFont systemFontOfSize:11];
-        hint.textColor = UIColor.tertiaryLabelColor;
-        hint.textAlignment = NSTextAlignmentCenter;
-        [screen addSubview:hint];
     } else {
-        UILabel *placeholder = [[UILabel alloc] initWithFrame:screen.bounds];
-        placeholder.text = @"No image";
+        UILabel *placeholder = [[UILabel alloc] initWithFrame:CGRectMake(8, screenH/2 - 20, screenW - 16, 40)];
+        placeholder.text = @"No image selected";
         placeholder.textColor = UIColor.tertiaryLabelColor;
         placeholder.font = [UIFont systemFontOfSize:13];
         placeholder.textAlignment = NSTextAlignmentCenter;
