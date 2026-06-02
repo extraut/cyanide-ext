@@ -85,29 +85,56 @@ static uint64_t picture_overlay_get_scene(void)
 static uint64_t picture_overlay_create_window(uint64_t scene, uint64_t overlayId, CGFloat windowLevel)
 {
     uint64_t UIWindow = r_class("UIWindow");
-    if (!r_is_objc_ptr(UIWindow)) return 0;
+    if (!r_is_objc_ptr(UIWindow)) {
+        printf("[PICTURE] UIWindow class not found\n");
+        return 0;
+    }
 
     uint64_t winAlloc = r_msg2_main(UIWindow, "alloc", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(winAlloc)) return 0;
+    if (!r_is_objc_ptr(winAlloc)) {
+        printf("[PICTURE] UIWindow alloc failed\n");
+        return 0;
+    }
 
     uint64_t win = r_msg2_main(winAlloc, "initWithWindowScene:", scene, 0, 0, 0);
     r_msg2_main(winAlloc, "release", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(win)) return 0;
+    if (!r_is_objc_ptr(win)) {
+        printf("[PICTURE] initWithWindowScene: failed\n");
+        return 0;
+    }
+
+    printf("[PICTURE] created window=0x%llx for id=%llu level=%.1f\n", win, overlayId, windowLevel);
 
     // Set window level (passed by caller; clamped to 1–9999)
     r_msg2_main(win, "setWindowLevel:", *(uint64_t *)&windowLevel, 0, 0, 0);
 
-    // Make it non-interactive (let touches pass through)
-    uint64_t NSNumber_class = r_class("NSNumber");
-    uint64_t one = r_msg2_main(NSNumber_class, "numberWithBool:", 0, 0, 0, 0);
-    if (r_is_objc_ptr(one)) {
-        r_msg2_main(win, "setUserInteractionEnabled:", 0, 0, 0, 0); // false
+    // Set background to clear (CRITICAL: without this the window has default white background)
+    uint64_t UIColor = r_class("UIColor");
+    if (r_is_objc_ptr(UIColor)) {
+        uint64_t clear = r_msg2_main(UIColor, "clearColor", 0, 0, 0, 0);
+        if (r_is_objc_ptr(clear)) r_msg2_main(win, "setBackgroundColor:", clear, 0, 0, 0);
     }
 
-    // Set hidden = NO initially
+    // Make it non-interactive (let touches pass through)
+    r_msg2_main(win, "setUserInteractionEnabled:", 0, 0, 0, 0);
+
+    // Set root view controller so window has a view (required for hit testing/layer setup)
+    uint64_t UIViewController = r_class("UIViewController");
+    if (r_is_objc_ptr(UIViewController)) {
+        uint64_t vcAlloc = r_msg2_main(UIViewController, "alloc", 0, 0, 0, 0);
+        if (r_is_objc_ptr(vcAlloc)) {
+            uint64_t vc = r_msg2_main(vcAlloc, "init", 0, 0, 0, 0);
+            r_msg2_main(vcAlloc, "release", 0, 0, 0, 0);
+            if (r_is_objc_ptr(vc)) {
+                r_msg2_main(win, "setRootViewController:", vc, 0, 0, 0);
+                r_msg2_main(vc, "release", 0, 0, 0, 0);
+            }
+        }
+    }
+
+    // Set hidden = NO to show window
     r_msg2_main(win, "setHidden:", 0, 0, 0, 0);
 
-    printf("[PICTURE] created overlay window=0x%llx for id=%llu\n", win, overlayId);
     return win;
 }
 
@@ -319,7 +346,7 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
         r_msg2_main(existingView, "setAlpha:", *(uint64_t *)&alpha, 0, 0, 0);
 
         r_msg2_main(existingView, "setHidden:", 0, 0, 0, 0);
-        r_msg2_main(window, "makeKeyAndVisible:", 0, 0, 0, 0);
+        r_msg2_main(window, "setHidden:", 0, 0, 0, 0);
 
         printf("[PICTURE] updated view id=%llu at (%.0f, %.0f)\n", overlayId, posX, posY);
         return true;
@@ -369,7 +396,7 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
 
     // Add to window
     r_msg2_main(window, "addSubview:", imageView, 0, 0, 0);
-    r_msg2_main(window, "makeKeyAndVisible:", 0, 0, 0, 0);
+    r_msg2_main(window, "setHidden:", 0, 0, 0, 0);
 
     printf("[PICTURE] created overlay id=%llu tag=0x%llx level=%.0f at (%.0f, %.0f) size (%.0f, %.0f)\n",
            overlayId, tag, windowLevel, posX, posY, scaledW, scaledH);
