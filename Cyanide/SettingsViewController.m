@@ -3569,7 +3569,19 @@ void settings_run_actions(void)
             BOOL runThemer = [d boolForKey:kSettingsThemerEnabled];
             BOOL runLayoutExtras = [d boolForKey:kSettingsLayoutExtrasEnabled];
             BOOL runStageStrip = [d boolForKey:kSettingsStageStripEnabled];
-            BOOL runPictureOverlay = [d boolForKey:kSettingsPictureOverlayEnabled] && [[d stringForKey:kSettingsPictureOverlayPath] length] > 0;
+
+            // Picture Overlay: check both legacy single-overlay AND the new multi-overlay list
+            BOOL legacyOverlay = [d boolForKey:kSettingsPictureOverlayEnabled] &&
+                                 [[d stringForKey:kSettingsPictureOverlayPath] length] > 0;
+            BOOL anyListOverlay = NO;
+            NSArray *overlayList = [d arrayForKey:kSettingsPictureOverlayList] ?: @[];
+            for (NSDictionary *ov in overlayList) {
+                if ([ov[@"enabled"] boolValue] && [ov[@"path"] length] > 0) {
+                    anyListOverlay = YES;
+                    break;
+                }
+            }
+            BOOL runPictureOverlay = legacyOverlay || anyListOverlay;
             // TypeBanner prewarms its hidden SpringBoard window during Apply
             // and reuses the open SpringBoard session for text-only updates.
             BOOL needsSpringBoard = runSandboxEscape || runSBC || runDarkTweaks || runStatBar || runRSSI || runAxonLite || runLayoutExtras || runTypeBanner || runThemer || runStageStrip || runPictureOverlay;
