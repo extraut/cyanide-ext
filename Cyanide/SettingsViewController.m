@@ -4835,36 +4835,128 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     [rows addObject:@{
         @"kind": @"info",
         @"title": @"Picture Overlays",
-        @"subtitle": [NSString stringWithFormat:@"%lu overlay(s) configured — tap + to add",
+        @"subtitle": [NSString stringWithFormat:@"%lu overlay(s). Tap + to add. Each overlay is shown on home and lock screen only.",
                        (unsigned long)list.count]
     }];
 
     // Add button for new overlay
     [rows addObject:@{
         @"kind": @"button",
-        @"title": @"Add Overlay",
+        @"title": @"Add New Overlay",
         @"action": @"picture-overlay-add"
     }];
 
-    // Existing overlays
+    // Existing overlays — each gets a header, controls, and action buttons
     for (NSDictionary *overlay in list) {
         uint64_t oid = [overlay[@"id"] unsignedLongLongValue];
         BOOL enabled = [overlay[@"enabled"] boolValue];
         NSString *path = overlay[@"path"] ?: @"";
         BOOL hasImage = path.length > 0;
 
-        // Overlay entry with expand/collapse state
+        // Overlay entry header (with image name and enable state)
+        NSString *name = hasImage ? [path.lastPathComponent stringByDeletingPathExtension] : @"Untitled";
         [rows addObject:@{
             @"kind": @"custom",
             @"kind2": @"picture-overlay-entry",
-            @"title": hasImage ? [path.lastPathComponent stringByDeletingPathExtension] : @"No image",
-            @"subtitle": enabled ? @"Enabled" : @"Disabled",
+            @"title": name,
+            @"subtitle": enabled ? @"● ON" : @"○ OFF",
             @"enabled": @(enabled),
+            @"overlayId": @(oid)
+        }];
+
+        // Per-overlay controls (only when enabled)
+        if (enabled && hasImage) {
+            [rows addObject:@{
+                @"kind": @"custom",
+                @"kind2": @"picture-preview",
+                @"title": @"Preview",
+                @"overlayId": @(oid)
+            }];
+
+            [rows addObject:@{
+                @"kind": @"slider",
+                @"key": [self pictureOverlayScaleKey:oid],
+                @"title": @"Size",
+                @"min": @10,
+                @"max": @200,
+                @"step": @1,
+                @"unit": @"%",
+                @"default": @100
+            }];
+
+            [rows addObject:@{
+                @"kind": @"slider",
+                @"key": [self pictureOverlayAlphaKey:oid],
+                @"title": @"Opacity",
+                @"min": @0,
+                @"max": @100,
+                @"step": @1,
+                @"unit": @"%",
+                @"default": @100
+            }];
+
+            [rows addObject:@{
+                @"kind": @"slider",
+                @"key": [self pictureOverlayOffsetXKey:oid],
+                @"title": @"Horizontal Offset",
+                @"min": @(-200),
+                @"max": @200,
+                @"step": @1,
+                @"unit": @"pt",
+                @"default": @0
+            }];
+
+            [rows addObject:@{
+                @"kind": @"slider",
+                @"key": [self pictureOverlayOffsetYKey:oid],
+                @"title": @"Vertical Offset",
+                @"min": @(-200),
+                @"max": @200,
+                @"step": @1,
+                @"unit": @"pt",
+                @"default": @0
+            }];
+        }
+
+        // Action buttons (change image, delete)
+        [rows addObject:@{
+            @"kind": @"button",
+            @"title": hasImage ? @"Change Image…" : @"Select Image…",
+            @"action": @"picture-overlay-change",
+            @"overlayId": @(oid)
+        }];
+
+        [rows addObject:@{
+            @"kind": @"button",
+            @"title": @"Delete Overlay",
+            @"action": @"picture-overlay-delete",
+            @"destructive": @YES,
             @"overlayId": @(oid)
         }];
     }
 
     return rows;
+}
+
+// Per-overlay keys
+- (NSString *)pictureOverlayScaleKey:(uint64_t)oid
+{
+    return [NSString stringWithFormat:@"PO_Scale_%llu", oid];
+}
+
+- (NSString *)pictureOverlayAlphaKey:(uint64_t)oid
+{
+    return [NSString stringWithFormat:@"PO_Alpha_%llu", oid];
+}
+
+- (NSString *)pictureOverlayOffsetXKey:(uint64_t)oid
+{
+    return [NSString stringWithFormat:@"PO_OffsetX_%llu", oid];
+}
+
+- (NSString *)pictureOverlayOffsetYKey:(uint64_t)oid
+{
+    return [NSString stringWithFormat:@"PO_OffsetY_%llu", oid];
 }
 
 // Get overlay dict by ID
@@ -6692,7 +6784,8 @@ void cyanide_present_contact(UIViewController *host)
     BOOL supported = settings_device_supported();
 
     if ([kind isEqualToString:@"custom"] && [row[@"kind2"] isEqualToString:@"picture-preview"]) {
-        return [self buildPictureOverlayPreviewCell:tableView];
+        uint64_t oid = [row[@"overlayId"] unsignedLongLongValue];
+        return [self buildPictureOverlayPreviewCell:tableView overlayId:oid];
     }
 
     if ([kind isEqualToString:@"info"]) {
@@ -6966,6 +7059,40 @@ void cyanide_present_contact(UIViewController *host)
     if (valueLabel) {
         valueLabel.text = [NSString stringWithFormat:@"%ld%@", (long)value, unit];
     }
+
+    // Live update during drag for picture overlay per-overlay settings
+    NSDictionary *row = [self rowForTag:sender.tag];
+    if (row) {
+        NSString *key = row[@"key"];
+        if ([key hasPrefix:@"PO_Scale_"] || [key hasPrefix:@"PO_Alpha_"] ||
+            [key hasPrefix:@"PO_OffsetX_"] || [key hasPrefix:@"PO_OffsetY_"]) {
+            // Extract overlay ID from key
+            NSArray *parts = [key componentsSeparatedByString:@"_"];
+            if (parts.count >= 3) {
+                uint64_t oid = (uint64_t)[[parts lastObject] integerValue];
+                NSDictionary *overlay = [self overlayWithId:oid];
+                if (overlay && [overlay[@"enabled"] boolValue]) {
+                    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+                    [d setInteger:value forKey:key];
+                    NSString *path = overlay[@"path"];
+                    if (path.length > 0) {
+                        // Live apply to SpringBoard
+                        dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                            @synchronized (settings_rc_lock()) {
+                                if (g_springboard_rc_ready) {
+                                    picture_overlay_apply_in_session(oid, YES, [path UTF8String],
+                                        (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
+                                        (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
+                                        (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
+                                        (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]]);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 - (void)sliderEnded:(UISlider *)sender
@@ -6990,6 +7117,11 @@ void cyanide_present_contact(UIViewController *host)
         [self presentApplyLogIfRunning];
     }
     if (settings_key_is_location_sim(key)) {
+        [self.tableView reloadData];
+    }
+    // For picture overlay sliders — live reload preview cell
+    if ([key hasPrefix:@"PO_Scale_"] || [key hasPrefix:@"PO_Alpha_"] ||
+        [key hasPrefix:@"PO_OffsetX_"] || [key hasPrefix:@"PO_OffsetY_"]) {
         [self.tableView reloadData];
     }
 }
@@ -7824,26 +7956,28 @@ void cyanide_present_contact(UIViewController *host)
     if (indexPath.section == SectionPictureOverlay) {
         NSDictionary *row = [self rowsForSection:indexPath.section][indexPath.row];
         NSString *action = row[@"action"];
+        NSNumber *oidNumber = row[@"overlayId"];
 
         // Check if it's a custom overlay entry row
         if ([row[@"kind2"] isEqualToString:@"picture-overlay-entry"]) {
-            // Toggle enabled state
-            uint64_t oid = [row[@"overlayId"] unsignedLongLongValue];
+            uint64_t oid = [oidNumber unsignedLongLongValue];
             NSDictionary *overlay = [self overlayWithId:oid];
             if (overlay) {
                 BOOL currentlyEnabled = [overlay[@"enabled"] boolValue];
                 [self updateOverlayWithId:oid updates:@{@"enabled": @(!currentlyEnabled)}];
 
                 if (!currentlyEnabled) {
-                    // Enable: apply to SB
-                    const char *path = [overlay[@"path"] UTF8String];
-                    picture_overlay_apply_in_session(oid, YES, path,
-                        [overlay[@"offsetX"] intValue],
-                        [overlay[@"offsetY"] intValue],
-                        [overlay[@"scale"] intValue],
-                        [overlay[@"alpha"] intValue]);
+                    // Enable: apply to SB with current per-overlay settings
+                    NSString *path = overlay[@"path"];
+                    if (path.length > 0) {
+                        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+                        picture_overlay_apply_in_session(oid, YES, [path UTF8String],
+                            (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
+                            (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
+                            (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
+                            (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]]);
+                    }
                 } else {
-                    // Disable: stop in SB
                     picture_overlay_stop_in_session(oid);
                 }
                 [self.tableView reloadData];
@@ -7853,6 +7987,13 @@ void cyanide_present_contact(UIViewController *host)
 
         if ([action isEqualToString:@"picture-overlay-add"]) {
             [self addNewOverlay];
+        } else if ([action isEqualToString:@"picture-overlay-change"]) {
+            uint64_t oid = [oidNumber unsignedLongLongValue];
+            [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)oid forKey:kSettingsPictureOverlayPendingPick];
+            [self presentPictureOverlayPicker];
+        } else if ([action isEqualToString:@"picture-overlay-delete"]) {
+            uint64_t oid = [oidNumber unsignedLongLongValue];
+            [self deleteOverlayWithId:oid];
         } else if ([action isEqualToString:@"picture-overlay-select"]) {
             [self presentPictureOverlayPicker];
         }
@@ -7861,7 +8002,7 @@ void cyanide_present_contact(UIViewController *host)
 
 #pragma mark - Picture Overlay UI
 
-- (UITableViewCell *)buildPictureOverlayPreviewCell:(UITableView *)tableView
+- (UITableViewCell *)buildPictureOverlayPreviewCell:(UITableView *)tableView overlayId:(uint64_t)overlayId
 {
     static NSString *const reuseId = @"picture-overlay-preview";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseId];
@@ -7871,34 +8012,42 @@ void cyanide_present_contact(UIViewController *host)
     for (UIView *v in [cell.contentView.subviews copy]) [v removeFromSuperview];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
 
-    NSString *path = [[NSUserDefaults standardUserDefaults] stringForKey:kSettingsPictureOverlayPath];
+    // Get overlay data
+    NSDictionary *overlay = [self overlayWithId:overlayId];
+    NSString *path = overlay[@"path"] ?: @"";
     UIImage *image = nil;
     if (path.length > 0) {
         image = [UIImage imageWithContentsOfFile:path];
     }
 
-    // Preview container (miniaturized screen)
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+
+    // Get per-overlay settings
+    NSInteger scalePct = [d integerForKey:[self pictureOverlayScaleKey:overlayId]];
+    NSInteger alphaPct = [d integerForKey:[self pictureOverlayAlphaKey:overlayId]];
+    NSInteger offsetX = [d integerForKey:[self pictureOverlayOffsetXKey:overlayId]];
+    NSInteger offsetY = [d integerForKey:[self pictureOverlayOffsetYKey:overlayId]];
+
+    // Defaults if not set
+    if (scalePct == 0) scalePct = 100;
+    if (alphaPct == 0) alphaPct = 100;
+
+    // Preview container
     CGFloat screenW = 200.0;
-    CGFloat screenH = 430.0;
+    CGFloat screenH = 200.0;
 
     UIView *screen = [[UIView alloc] initWithFrame:CGRectMake((tableView.bounds.size.width - screenW) / 2.0, 8.0, screenW, screenH)];
     screen.backgroundColor = [UIColor systemBackgroundColor];
     screen.layer.borderColor = UIColor.separatorColor.CGColor;
     screen.layer.borderWidth = 1.0;
-    screen.layer.cornerRadius = 24.0;
+    screen.layer.cornerRadius = 12.0;
     screen.layer.masksToBounds = YES;
     [cell.contentView addSubview:screen];
 
     if (image) {
-        // Apply same scale/alpha as live settings
-        CGFloat scalePct = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayScale];
-        CGFloat alphaPct = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayAlpha];
-        CGFloat offsetX = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayOffsetX];
-        CGFloat offsetY = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayOffsetY];
-
-        // Scale image to fit
-        CGFloat maxW = screenW * 0.9;
-        CGFloat maxH = screenH * 0.9;
+        // Scale image to fit container
+        CGFloat maxW = screenW - 16;
+        CGFloat maxH = screenH - 16;
         CGFloat imgW = MIN(image.size.width, maxW);
         CGFloat imgH = imgW * (image.size.height / MAX(image.size.width, 1.0));
         if (imgH > maxH) {
@@ -7906,34 +8055,45 @@ void cyanide_present_contact(UIViewController *host)
             imgW = imgH * (image.size.width / MAX(image.size.height, 1.0));
         }
 
-        // Apply user scale percentage
-        CGFloat userScale = scalePct / 100.0;
+        // Apply user scale
+        CGFloat userScale = (CGFloat)scalePct / 100.0;
         imgW *= userScale;
         imgH *= userScale;
 
-        // Calculate position with offset
-        CGFloat posX = (screenW - imgW) / 2.0 + (offsetX * 0.5); // preview scales offset
+        // Position with offset (scaled for preview)
+        CGFloat posX = (screenW - imgW) / 2.0 + (offsetX * 0.5);
         CGFloat posY = (screenH - imgH) / 2.0 + (offsetY * 0.5);
 
         UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(posX, posY, imgW, imgH)];
         iv.image = image;
         iv.contentMode = UIViewContentModeScaleAspectFit;
-        iv.alpha = alphaPct / 100.0;
+        iv.alpha = (CGFloat)alphaPct / 100.0;
         iv.userInteractionEnabled = YES;
-        iv.layer.cornerRadius = 8.0;
+        iv.layer.cornerRadius = 6.0;
         iv.clipsToBounds = YES;
+        iv.tag = (NSInteger)overlayId;
         [screen addSubview:iv];
 
         // Drag gesture for repositioning
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
                                        initWithTarget:self
                                                action:@selector(pictureOverlayPreviewPanned:)];
+        iv.accessibilityHint = [@(overlayId) stringValue];
         [iv addGestureRecognizer:pan];
+
+        // Value label
+        UILabel *values = [[UILabel alloc] initWithFrame:CGRectMake(0, screenH + 4, screenW, 14)];
+        values.text = [NSString stringWithFormat:@"X:%ld Y:%ld S:%ld%% A:%ld%%",
+                       (long)offsetX, (long)offsetY, (long)scalePct, (long)alphaPct];
+        values.font = [UIFont systemFontOfSize:10];
+        values.textColor = UIColor.tertiaryLabelColor;
+        values.textAlignment = NSTextAlignmentCenter;
+        [cell.contentView addSubview:values];
     } else {
-        UILabel *placeholder = [[UILabel alloc] initWithFrame:CGRectMake(8, screenH/2 - 20, screenW - 16, 40)];
-        placeholder.text = @"No image selected";
+        UILabel *placeholder = [[UILabel alloc] initWithFrame:screen.bounds];
+        placeholder.text = @"No image";
         placeholder.textColor = UIColor.tertiaryLabelColor;
-        placeholder.font = [UIFont systemFontOfSize:13];
+        placeholder.font = [UIFont systemFontOfSize:12];
         placeholder.textAlignment = NSTextAlignmentCenter;
         [screen addSubview:placeholder];
     }
@@ -7947,30 +8107,56 @@ void cyanide_present_contact(UIViewController *host)
     UIView *screen = iv.superview;
     if (!iv || !screen) return;
 
+    // Get overlay ID from tag
+    uint64_t overlayId = (uint64_t)iv.tag;
+    if (overlayId == 0) {
+        // Try from accessibilityHint
+        NSString *hint = iv.accessibilityHint;
+        if (hint) overlayId = (uint64_t)[hint integerValue];
+    }
+
     CGPoint translation = [pan translationInView:screen];
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
 
-    CGFloat offsetX = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayOffsetX];
-    CGFloat offsetY = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayOffsetY];
+    NSInteger offsetX = [d integerForKey:[self pictureOverlayOffsetXKey:overlayId]];
+    NSInteger offsetY = [d integerForKey:[self pictureOverlayOffsetYKey:overlayId]];
 
-    // Preview is 2x scale-down, multiply back to device points
     CGFloat scaleFactor = 2.0;
-    CGFloat newOffsetX = offsetX + (translation.x * scaleFactor);
-    CGFloat newOffsetY = offsetY + (translation.y * scaleFactor);
+    NSInteger newOffsetX = offsetX + (NSInteger)(translation.x * scaleFactor);
+    NSInteger newOffsetY = offsetY + (NSInteger)(translation.y * scaleFactor);
 
-    // Clamp to reasonable range
-    newOffsetX = MAX(-300.0, MIN(300.0, newOffsetX));
-    newOffsetY = MAX(-300.0, MIN(300.0, newOffsetY));
+    newOffsetX = MAX(-200, MIN(200, newOffsetX));
+    newOffsetY = MAX(-200, MIN(200, newOffsetY));
 
-    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)newOffsetX forKey:kSettingsPictureOverlayOffsetX];
-    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)newOffsetY forKey:kSettingsPictureOverlayOffsetY];
+    [d setInteger:newOffsetX forKey:[self pictureOverlayOffsetXKey:overlayId]];
+    [d setInteger:newOffsetY forKey:[self pictureOverlayOffsetYKey:overlayId]];
+    [d synchronize];
 
     [pan setTranslation:CGPointZero inView:screen];
 
-    if (pan.state == UIGestureRecognizerStateEnded) {
-        settings_schedule_live_apply_for_key(kSettingsPictureOverlayOffsetX);
-    } else {
-        // Live update during drag for responsiveness
-        settings_schedule_live_apply_for_key(kSettingsPictureOverlayOffsetX);
+    // Live update preview position
+    CGFloat imgW = iv.bounds.size.width;
+    CGFloat imgH = iv.bounds.size.height;
+    CGFloat posX = (screen.bounds.size.width - imgW) / 2.0 + (newOffsetX * 0.5);
+    CGFloat posY = (screen.bounds.size.height - imgH) / 2.0 + (newOffsetY * 0.5);
+    iv.frame = CGRectMake(posX, posY, imgW, imgH);
+
+    // Apply to SpringBoard in real-time
+    if (g_springboard_rc_ready && pan.state == UIGestureRecognizerStateEnded) {
+        NSDictionary *overlay = [self overlayWithId:overlayId];
+        if (overlay && [overlay[@"enabled"] boolValue]) {
+            NSString *path = overlay[@"path"];
+            if (path.length > 0) {
+                dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                    @synchronized (settings_rc_lock()) {
+                        picture_overlay_apply_in_session(overlayId, YES, [path UTF8String],
+                            (int)newOffsetX, (int)newOffsetY,
+                            (int)[d integerForKey:[self pictureOverlayScaleKey:overlayId]],
+                            (int)[d integerForKey:[self pictureOverlayAlphaKey:overlayId]]);
+                    }
+                });
+            }
+        }
     }
 }
 
