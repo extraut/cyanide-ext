@@ -3357,12 +3357,14 @@ static void settings_schedule_live_apply_for_key(NSString *key)
                         if (path.length == 0) continue;
 
                         uint64_t oid = [overlay[@"id"] unsignedLongLongValue];
+                        int zIndex = (int)[d integerForKey:[NSString stringWithFormat:@"PO_Z_%llu", oid]];
+                        if (zIndex < 1) zIndex = 1050;
                         picture_overlay_apply_in_session(oid, YES, [path UTF8String],
                             [overlay[@"offsetX"] intValue],
                             [overlay[@"offsetY"] intValue],
                             [overlay[@"scale"] intValue],
                             [overlay[@"alpha"] intValue],
-                            (int)[d integerForKey:[self pictureOverlayZKey:oid]] ?: 1050);
+                            zIndex);
                     }
 
                     // Legacy single overlay
@@ -3784,7 +3786,7 @@ void settings_run_actions(void)
                             if (path.length == 0) continue;
 
                             uint64_t oid = [overlay[@"id"] unsignedLongLongValue];
-                            int zIndex = (int)[d integerForKey:[self pictureOverlayZKey:oid]];
+                            int zIndex = (int)[d integerForKey:[NSString stringWithFormat:@"PO_Z_%llu", oid]];
                             if (zIndex < 1) zIndex = 1050;
                             ok &= picture_overlay_apply_in_session(oid, YES, [path UTF8String],
                                 [overlay[@"offsetX"] intValue],
@@ -7111,13 +7113,13 @@ void cyanide_present_contact(UIViewController *host)
                         dispatch_async(dispatch_get_global_queue(0, 0), ^{
                             @synchronized (settings_rc_lock()) {
                                 if (g_springboard_rc_ready) {
-                                    int zIndex = (int)[d integerForKey:[self pictureOverlayZKey:oid]];
+                                    int zIndex = (int)[d integerForKey:[NSString stringWithFormat:@"PO_Z_%llu", oid]];
                                     if (zIndex < 1) zIndex = 1050;
                                     picture_overlay_apply_in_session(oid, YES, [path UTF8String],
-                                        (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
-                                        (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
-                                        (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
-                                        (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]],
+                                        (int)[d integerForKey:[NSString stringWithFormat:@"PO_OffsetX_%llu", oid]],
+                                        (int)[d integerForKey:[NSString stringWithFormat:@"PO_OffsetY_%llu", oid]],
+                                        (int)[d integerForKey:[NSString stringWithFormat:@"PO_Scale_%llu", oid]],
+                                        (int)[d integerForKey:[NSString stringWithFormat:@"PO_Alpha_%llu", oid]],
                                         zIndex);
                                 }
                             }
@@ -8065,13 +8067,13 @@ void cyanide_present_contact(UIViewController *host)
         if (path.length > 0 && g_springboard_rc_ready) {
             dispatch_async(dispatch_get_global_queue(0, 0), ^{
                 @synchronized (settings_rc_lock()) {
-                    int zIndex = (int)[d integerForKey:[self pictureOverlayZKey:oid]];
+                    int zIndex = (int)[d integerForKey:[NSString stringWithFormat:@"PO_Z_%llu", oid]];
                     if (zIndex < 1) zIndex = 1050;
                     picture_overlay_apply_in_session(oid, YES, [path UTF8String],
-                        (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
-                        (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
-                        (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
-                        (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]],
+                        (int)[d integerForKey:[NSString stringWithFormat:@"PO_OffsetX_%llu", oid]],
+                        (int)[d integerForKey:[NSString stringWithFormat:@"PO_OffsetY_%llu", oid]],
+                        (int)[d integerForKey:[NSString stringWithFormat:@"PO_Scale_%llu", oid]],
+                        (int)[d integerForKey:[NSString stringWithFormat:@"PO_Alpha_%llu", oid]],
                         zIndex);
                 }
             });
@@ -8238,12 +8240,12 @@ void cyanide_present_contact(UIViewController *host)
             if (path.length > 0) {
                 dispatch_async(dispatch_get_global_queue(0, 0), ^{
                     @synchronized (settings_rc_lock()) {
-                        int zIndex = (int)[d integerForKey:[self pictureOverlayZKey:overlayId]];
+                        int zIndex = (int)[d integerForKey:[NSString stringWithFormat:@"PO_Z_%llu", overlayId]];
                         if (zIndex < 1) zIndex = 1050;
                         picture_overlay_apply_in_session(overlayId, YES, [path UTF8String],
                             (int)newOffsetX, (int)newOffsetY,
-                            (int)[d integerForKey:[self pictureOverlayScaleKey:overlayId]],
-                            (int)[d integerForKey:[self pictureOverlayAlphaKey:overlayId]],
+                            (int)[d integerForKey:[NSString stringWithFormat:@"PO_Scale_%llu", overlayId]],
+                            (int)[d integerForKey:[NSString stringWithFormat:@"PO_Alpha_%llu", overlayId]],
                             zIndex);
                     }
                 });
