@@ -3772,6 +3772,8 @@ void settings_run_actions(void)
                     if (runPictureOverlay) {
                         settings_progress(&step, total, "Applying Picture Overlay(s)");
 
+                        bool ok = true;
+
                         // Apply each enabled overlay from the list
                         NSArray *list = [d arrayForKey:kSettingsPictureOverlayList] ?: @[];
                         for (NSDictionary *overlay in list) {
@@ -3780,7 +3782,7 @@ void settings_run_actions(void)
                             if (path.length == 0) continue;
 
                             uint64_t oid = [overlay[@"id"] unsignedLongLongValue];
-                            picture_overlay_apply_in_session(oid, YES, [path UTF8String],
+                            ok &= picture_overlay_apply_in_session(oid, YES, [path UTF8String],
                                 [overlay[@"offsetX"] intValue],
                                 [overlay[@"offsetY"] intValue],
                                 [overlay[@"scale"] intValue],
@@ -3790,17 +3792,13 @@ void settings_run_actions(void)
                         // Legacy single overlay
                         NSString *legacyPath = [d stringForKey:kSettingsPictureOverlayPath];
                         if (legacyPath.length > 0 && [d boolForKey:kSettingsPictureOverlayEnabled]) {
-                            picture_overlay_apply_in_session(0, YES, [legacyPath UTF8String],
+                            ok &= picture_overlay_apply_in_session(0, YES, [legacyPath UTF8String],
                                 (int)[d integerForKey:kSettingsPictureOverlayOffsetX],
                                 (int)[d integerForKey:kSettingsPictureOverlayOffsetY],
                                 (int)[d integerForKey:kSettingsPictureOverlayScale],
                                 (int)[d integerForKey:kSettingsPictureOverlayAlpha]);
                         }
 
-                        settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, YES);
-                        printf("[SETTINGS] Picture Overlay multi-apply done\n");
-                        log_user("%s Picture Overlay(s) applied.\n", ok ? "[OK]" : "[WARN]");
-                        cyanide_upload_log_milestone(@"picture-overlay-applied");
                         settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, ok);
                         printf("[SETTINGS] Picture Overlay result=%d\n", ok);
                         log_user("%s Picture Overlay %s.\n",
