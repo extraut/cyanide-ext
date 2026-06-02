@@ -1494,7 +1494,9 @@ typedef struct {
     bool doubleTapToLock;
 } SettingsDarkTweaksResult;
 
-bool ok = darksword_tweaks_apply_in_session([d boolForKey:kSettingsDSDisableAppLibrary],
+static bool settings_apply_dark_tweaks_from_defaults_locked(NSUserDefaults *d)
+{
+    bool ok = darksword_tweaks_apply_in_session([d boolForKey:kSettingsDSDisableAppLibrary],
                                                [d boolForKey:kSettingsDSDisableIconFlyIn],
                                                [d boolForKey:kSettingsDSZeroWakeAnimation],
                                                [d boolForKey:kSettingsDSZeroBacklightFade],
