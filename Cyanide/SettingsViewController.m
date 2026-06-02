@@ -402,6 +402,7 @@ static NSArray<NSString *> *settings_rc_backed_tweak_keys(void)
             kSettingsLayoutExtrasEnabled,
             kSettingsThemerEnabled,
             kSettingsStageStripEnabled,
+            kSettingsPictureOverlayEnabled,
         ];
     });
     return keys;
@@ -3939,6 +3940,7 @@ typedef NS_ENUM(NSInteger, SettingsSection) {
     SectionNanoRegistry,
     SectionThemer,
     SectionLocationSim,
+    SectionPictureOverlay,
     SectionCount,
 };
 
@@ -4760,6 +4762,66 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     ];
 }
 
+- (NSArray<NSDictionary *> *)pictureOverlayRows
+{
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    BOOL hasImage = [[d stringForKey:kSettingsPictureOverlayPath] length] > 0;
+
+    return @[
+        @{ @"kind": @"info",
+           @"title": @"Selected Image",
+           @"subtitle": hasImage ? @"Image selected — preview below" : @"No image selected" },
+
+        @{ @"kind": @"button",
+           @"title": hasImage ? @"Change Image…" : @"Select Image or GIF…",
+           @"action": @"picture-overlay-select" },
+
+        @{ @"kind": @"custom",
+           @"kind2": @"picture-preview",
+           @"title": @"Preview" },
+
+        @{ @"kind": @"toggle",
+           @"key": kSettingsPictureOverlayEnabled,
+           @"title": @"Enable Overlay" },
+
+        @{ @"kind": @"slider",
+           @"key": kSettingsPictureOverlayScale,
+           @"title": @"Size",
+           @"min": @10,
+           @"max": @200,
+           @"step": @1,
+           @"unit": @"%",
+           @"default": @100 },
+
+        @{ @"kind": @"slider",
+           @"key": kSettingsPictureOverlayAlpha,
+           @"title": @"Opacity",
+           @"min": @0,
+           @"max": @100,
+           @"step": @1,
+           @"unit": @"%",
+           @"default": @100 },
+
+        @{ @"kind": @"slider",
+           @"key": kSettingsPictureOverlayOffsetX,
+           @"title": @"Horizontal Offset",
+           @"min": @(-200),
+           @"max": @200,
+           @"step": @1,
+           @"unit": @"pt",
+           @"default": @0 },
+
+        @{ @"kind": @"slider",
+           @"key": kSettingsPictureOverlayOffsetY,
+           @"title": @"Vertical Offset",
+           @"min": @(-200),
+           @"max": @200,
+           @"step": @1,
+           @"unit": @"pt",
+           @"default": @0 },
+    ];
+}
+
 - (NSArray<NSDictionary *> *)themerRows
 {
     BOOL hasSelection = settings_themer_has_selected_theme();
@@ -4833,6 +4895,11 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         [out addObject:@{@"title": @"Theme", @"value": settings_themer_selected_theme_display_name()}];
     } else if (section == SectionLocationSim) {
         [out addObject:@{@"title": @"Target", @"value": settings_location_sim_target_summary(d)}];
+    } else if (section == SectionPictureOverlay) {
+        BOOL enabled = [d boolForKey:kSettingsPictureOverlayEnabled];
+        BOOL hasImage = [[d stringForKey:kSettingsPictureOverlayPath] length] > 0;
+        [out addObject:@{@"title": @"Enabled", @"value": enabled ? @"Yes" : @"No"}];
+        [out addObject:@{@"title": @"Image", @"value": hasImage ? @"Selected" : @"None"}];
     }
     return out;
 }
@@ -4854,6 +4921,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case SectionAxonLite:  return self.axonLiteRows;
         case SectionTypeBanner: return self.typebannerRows;
         case SectionLocationSim: return self.locationSimRows;
+        case SectionPictureOverlay: return self.pictureOverlayRows;
         default: return @[];
     }
 }
@@ -4879,6 +4947,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         @{ @"title": @"SpringBoard Tweaks", @"icon": @"apps.iphone",                         @"color": [UIColor systemIndigoColor], @"section": @(SectionDarkSwordTweaks) },
         @{ @"title": @"Drag Coefficient",   @"icon": @"dial.medium.fill",                    @"color": [UIColor systemIndigoColor], @"section": @(SectionDragCoefficient) },
         @{ @"title": @"Home Layout Extras", @"icon": @"square.dashed.inset.filled",          @"color": [UIColor systemPurpleColor], @"section": @(SectionLayoutExtras) },
+        @{ @"title": @"Picture Overlay",   @"icon": @"photo.fill",                           @"color": [UIColor systemBlueColor],   @"section": @(SectionPictureOverlay) },
     ];
 }
 
@@ -5481,6 +5550,19 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
     BOOL scoped = [url startAccessingSecurityScopedResource];
     BOOL isDir = NO;
     [[NSFileManager defaultManager] fileExistsAtPath:url.path isDirectory:&isDir];
+
+    // Picture Overlay pick — image files only, copy to app sandbox
+    NSString *pathExt = url.pathExtension.lowercaseString;
+    BOOL isImage = !isDir && ([pathExt isEqualToString:@"png"] || [pathExt isEqualToString:@"jpg"] ||
+                              [pathExt isEqualToString:@"jpeg"] || [pathExt isEqualToString:@"gif"] ||
+                              [pathExt isEqualToString:@"heic"] || [pathExt isEqualToString:@"heif"]);
+    if (isImage) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            [self handlePictureOverlayPickedFileAtURL:url];
+        });
+        if (scoped) [url stopAccessingSecurityScopedResource];
+        return;
+    }
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *err = nil;
@@ -6479,6 +6561,10 @@ void cyanide_present_contact(UIViewController *host)
     NSString *kind = row[@"kind"] ?: @"toggle";
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     BOOL supported = settings_device_supported();
+
+    if ([kind isEqualToString:@"custom"] && [row[@"kind2"] isEqualToString:@"picture-preview"]) {
+        return [self buildPictureOverlayPreviewCell:tableView];
+    }
 
     if ([kind isEqualToString:@"info"]) {
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"info"];
@@ -7604,6 +7690,186 @@ void cyanide_present_contact(UIViewController *host)
             [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0]
                           withRowAnimation:UITableViewRowAnimationNone];
         }
+    }
+
+    if (indexPath.section == SectionPictureOverlay) {
+        NSDictionary *row = [self rowsForSection:indexPath.section][indexPath.row];
+        NSString *action = row[@"action"];
+        if ([action isEqualToString:@"picture-overlay-select"]) {
+            [self presentPictureOverlayPicker];
+        }
+    }
+}
+
+#pragma mark - Picture Overlay UI
+
+- (UITableViewCell *)buildPictureOverlayPreviewCell:(UITableView *)tableView
+{
+    static NSString *const reuseId = @"picture-overlay-preview";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseId];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseId];
+    }
+    for (UIView *v in [cell.contentView.subviews copy]) [v removeFromSuperview];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    NSString *path = [[NSUserDefaults standardUserDefaults] stringForKey:kSettingsPictureOverlayPath];
+    UIImage *image = nil;
+    if (path.length > 0) {
+        image = [UIImage imageWithContentsOfFile:path];
+    }
+
+    // Preview container (miniaturized screen)
+    CGFloat screenW = 200.0;
+    CGFloat screenH = 430.0;
+
+    UIView *screen = [[UIView alloc] initWithFrame:CGRectMake((tableView.bounds.size.width - screenW) / 2.0, 8.0, screenW, screenH)];
+    screen.backgroundColor = [UIColor systemBackgroundColor];
+    screen.layer.borderColor = UIColor.separatorColor.CGColor;
+    screen.layer.borderWidth = 1.0;
+    screen.layer.cornerRadius = 24.0;
+    screen.layer.masksToBounds = YES;
+    [cell.contentView addSubview:screen];
+
+    if (image) {
+        // Apply same scale/alpha as live settings
+        CGFloat scalePct = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayScale];
+        CGFloat alphaPct = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayAlpha];
+        CGFloat offsetX = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayOffsetX];
+        CGFloat offsetY = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayOffsetY];
+
+        // Scale image to fit
+        CGFloat maxW = screenW * 0.9;
+        CGFloat maxH = screenH * 0.9;
+        CGFloat imgW = MIN(image.size.width, maxW);
+        CGFloat imgH = imgW * (image.size.height / MAX(image.size.width, 1.0));
+        if (imgH > maxH) {
+            imgH = maxH;
+            imgW = imgH * (image.size.width / MAX(image.size.height, 1.0));
+        }
+
+        // Apply user scale percentage
+        CGFloat userScale = scalePct / 100.0;
+        imgW *= userScale;
+        imgH *= userScale;
+
+        // Calculate position with offset
+        CGFloat posX = (screenW - imgW) / 2.0 + (offsetX * 0.5); // preview scales offset
+        CGFloat posY = (screenH - imgH) / 2.0 + (offsetY * 0.5);
+
+        UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(posX, posY, imgW, imgH)];
+        iv.image = image;
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        iv.alpha = alphaPct / 100.0;
+        iv.userInteractionEnabled = YES;
+        [screen addSubview:iv];
+
+        // Drag gesture for repositioning
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+                                       initWithTarget:self
+                                               action:@selector(pictureOverlayPreviewPanned:)];
+        [iv addGestureRecognizer:pan];
+
+        // Hint label
+        UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, screenH + 12, screenW, 16)];
+        hint.text = @"Drag image to position";
+        hint.font = [UIFont systemFontOfSize:11];
+        hint.textColor = UIColor.tertiaryLabelColor;
+        hint.textAlignment = NSTextAlignmentCenter;
+        [screen addSubview:hint];
+    } else {
+        UILabel *placeholder = [[UILabel alloc] initWithFrame:screen.bounds];
+        placeholder.text = @"No image";
+        placeholder.textColor = UIColor.tertiaryLabelColor;
+        placeholder.font = [UIFont systemFontOfSize:13];
+        placeholder.textAlignment = NSTextAlignmentCenter;
+        [screen addSubview:placeholder];
+    }
+
+    return cell;
+}
+
+- (void)pictureOverlayPreviewPanned:(UIPanGestureRecognizer *)pan
+{
+    UIView *iv = pan.view;
+    UIView *screen = iv.superview;
+    if (!iv || !screen) return;
+
+    CGPoint translation = [pan translationInView:screen];
+
+    CGFloat offsetX = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayOffsetX];
+    CGFloat offsetY = (CGFloat)[[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayOffsetY];
+
+    // Preview is 2x scale-down, multiply back to device points
+    CGFloat scaleFactor = 2.0;
+    CGFloat newOffsetX = offsetX + (translation.x * scaleFactor);
+    CGFloat newOffsetY = offsetY + (translation.y * scaleFactor);
+
+    // Clamp to reasonable range
+    newOffsetX = MAX(-300.0, MIN(300.0, newOffsetX));
+    newOffsetY = MAX(-300.0, MIN(300.0, newOffsetY));
+
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)newOffsetX forKey:kSettingsPictureOverlayOffsetX];
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)newOffsetY forKey:kSettingsPictureOverlayOffsetY];
+
+    [pan setTranslation:CGPointZero inView:screen];
+
+    if (pan.state == UIGestureRecognizerStateEnded) {
+        settings_schedule_live_apply_for_key(kSettingsPictureOverlayOffsetX);
+    } else {
+        // Live update during drag for responsiveness
+        settings_schedule_live_apply_for_key(kSettingsPictureOverlayOffsetX);
+    }
+}
+
+- (NSString *)pictureOverlayImageStoragePath
+{
+    NSString *dir = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]
+                     stringByAppendingPathComponent:@"PictureOverlay"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+    return dir;
+}
+
+- (void)presentPictureOverlayPicker
+{
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
+        initForOpeningContentTypes:@[(id)UTTypeImage] asCopy:YES];
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    picker.shouldShowFileExtensions = YES;
+    [self presentViewController:picker animated:YES completion:nil];
+    log_user("[PICTURE] Pick an image or GIF to overlay on SpringBoard.\n");
+}
+
+- (void)handlePictureOverlayPickedFileAtURL:(NSURL *)srcURL
+{
+    if (!srcURL) return;
+    NSString *destDir = [self pictureOverlayImageStoragePath];
+    NSString *fileName = [NSString stringWithFormat:@"%@_%@",
+                          [[NSProcessInfo processInfo] globallyUniqueString],
+                          srcURL.lastPathComponent ?: @"image"];
+    NSString *destPath = [destDir stringByAppendingPathComponent:fileName];
+
+    NSError *err = nil;
+    BOOL copied = [[NSFileManager defaultManager] copyItemAtURL:srcURL toURL:[NSURL fileURLWithPath:destPath] error:&err];
+    if (!copied) {
+        log_user("[PICTURE] Failed to copy image: %s\n", err.localizedDescription.UTF8String ?: "unknown");
+        return;
+    }
+
+    [[NSUserDefaults standardUserDefaults] setObject:destPath forKey:kSettingsPictureOverlayPath];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    log_user("[PICTURE] Selected: %s\n", destPath.UTF8String);
+
+    // Refresh table
+    [self.tableView reloadData];
+
+    // If toggle is on, trigger live apply
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:kSettingsPictureOverlayEnabled]) {
+        settings_schedule_live_apply_for_key(kSettingsPictureOverlayEnabled);
     }
 }
 
