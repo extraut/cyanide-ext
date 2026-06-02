@@ -124,7 +124,7 @@ static uint64_t picture_overlay_load_gif(const char *imagePath)
     if (!data) return 0;
 
     // Check if it's a GIF
-    if (![[path pathExtension] lowercaseString] isEqualToString:@"gif"]) {
+    if (![[[path pathExtension] lowercaseString] isEqualToString:@"gif"]) {
         // Not a GIF, use regular image loading
         return 0;
     }
