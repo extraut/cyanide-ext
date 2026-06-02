@@ -22,10 +22,6 @@ static const uint64_t kPictureOverlayTag = 0xC0A15000;
 static uint64_t gPictureOverlayWindow = 0;
 static uint64_t gPictureOverlayImageView = 0;
 
-// Screen state caching (set by SettingsViewController via Darwin notify)
-// We check this before applying to avoid work when screen is asleep
-extern BOOL settings_screen_awake_cached(void);
-
 // Forward declaration
 static uint64_t picture_overlay_first_window(void);
 static uint64_t picture_overlay_existing_view(uint64_t window);
@@ -160,11 +156,6 @@ bool picture_overlay_apply_in_session(BOOL enabled, const char *imagePath,
                                       int offsetX, int offsetY,
                                       int scalePct, int alphaPct)
 {
-    // Don't apply if screen is off (battery saving)
-    if (!settings_screen_awake_cached()) {
-        return true;
-    }
-
     // If disabled, stop any existing overlay
     if (!enabled) {
         return picture_overlay_stop_in_session();
