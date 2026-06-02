@@ -3361,7 +3361,8 @@ static void settings_schedule_live_apply_for_key(NSString *key)
                             [overlay[@"offsetX"] intValue],
                             [overlay[@"offsetY"] intValue],
                             [overlay[@"scale"] intValue],
-                            [overlay[@"alpha"] intValue]);
+                            [overlay[@"alpha"] intValue],
+                            1050);
                     }
 
                     // Legacy single overlay
@@ -3371,7 +3372,8 @@ static void settings_schedule_live_apply_for_key(NSString *key)
                             (int)[d integerForKey:kSettingsPictureOverlayOffsetX],
                             (int)[d integerForKey:kSettingsPictureOverlayOffsetY],
                             (int)[d integerForKey:kSettingsPictureOverlayScale],
-                            (int)[d integerForKey:kSettingsPictureOverlayAlpha]);
+                            (int)[d integerForKey:kSettingsPictureOverlayAlpha],
+                            1050);
                     }
 
                     settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, YES);
@@ -3786,7 +3788,8 @@ void settings_run_actions(void)
                                 [overlay[@"offsetX"] intValue],
                                 [overlay[@"offsetY"] intValue],
                                 [overlay[@"scale"] intValue],
-                                [overlay[@"alpha"] intValue]);
+                                [overlay[@"alpha"] intValue],
+                                1050);
                         }
 
                         // Legacy single overlay
@@ -3796,7 +3799,8 @@ void settings_run_actions(void)
                                 (int)[d integerForKey:kSettingsPictureOverlayOffsetX],
                                 (int)[d integerForKey:kSettingsPictureOverlayOffsetY],
                                 (int)[d integerForKey:kSettingsPictureOverlayScale],
-                                (int)[d integerForKey:kSettingsPictureOverlayAlpha]);
+                                (int)[d integerForKey:kSettingsPictureOverlayAlpha],
+                                1050);
                         }
 
                         settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, ok);
@@ -7086,7 +7090,8 @@ void cyanide_present_contact(UIViewController *host)
                                         (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
                                         (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
                                         (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
-                                        (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]]);
+                                        (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]],
+                                        1050);
                                 }
                             }
                         });
@@ -8037,7 +8042,8 @@ void cyanide_present_contact(UIViewController *host)
                         (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
                         (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
                         (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
-                        (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]]);
+                        (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]],
+                        1050);
                 }
             });
         }
@@ -8206,7 +8212,8 @@ void cyanide_present_contact(UIViewController *host)
                         picture_overlay_apply_in_session(overlayId, YES, [path UTF8String],
                             (int)newOffsetX, (int)newOffsetY,
                             (int)[d integerForKey:[self pictureOverlayScaleKey:overlayId]],
-                            (int)[d integerForKey:[self pictureOverlayAlphaKey:overlayId]]);
+                            (int)[d integerForKey:[self pictureOverlayAlphaKey:overlayId]],
+                            1050);
                     }
                 });
             }
