@@ -247,13 +247,13 @@ bool picture_overlay_apply_in_session(BOOL enabled, const char *imagePath,
     struct { double x, y, w, h; } bounds = {0};
     r_msg2_main_struct_ret(window, "bounds",
                            &bounds, sizeof(bounds),
-                           NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+                           NULL, 0, NULL, 0, NULL, 0, NULL, 0);
 
     // Get image size
     struct { double x, y, w, h; } imageSize = {0};
     r_msg2_main_struct_ret(imageView, "bounds",
                            &imageSize, sizeof(imageSize),
-                           NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+                           NULL, 0, NULL, 0, NULL, 0, NULL, 0);
 
     // Calculate scaled size
     CGFloat scaleFactor = (CGFloat)scalePct / 100.0;

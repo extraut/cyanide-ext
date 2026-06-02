@@ -8,6 +8,7 @@
 #ifndef picture_overlay_h
 #define picture_overlay_h
 
+#import <Foundation/Foundation.h>
 #include <stdbool.h>
 
 bool picture_overlay_apply_in_session(BOOL enabled, const char *imagePath,
