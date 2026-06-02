@@ -240,13 +240,7 @@ static const NSInteger kSecLocationSim      = 15;
                                          isNew:NO];
         otaBlock.unstableWarning = @"Warning: persistent system-file edit. This package modifies launchd disabled.plist to change OTA job state across reboot. Disable or re-enable OTA updates at your own risk.";
 
-        list = @[
-            statBar,
-            sbc,
-            layoutExtras,
-            powercuff,
-
-            [[Package alloc] initWithIdentifier:@"com.darksword.disable-app-library"
+        Package *disableAppLibrary = [[Package alloc] initWithIdentifier:@"com.darksword.disable-app-library"
                                            name:@"Disable App Library"
                                shortDescription:@"Remove the App Library page"
                                 longDescription:@"Removes the App Library page that sits past your last home-screen page. Swiping past the last page becomes a no-op."
@@ -256,7 +250,15 @@ static const NSInteger kSecLocationSim      = 15;
                                      symbolName:@"square.grid.2x2.fill"
                                            kind:PackageInstallKindToggle
                                      enabledKey:kSettingsDSDisableAppLibrary
-                                          isNew:NO],
+                                          isNew:NO];
+
+        list = @[
+            statBar,
+            sbc,
+            layoutExtras,
+            powercuff,
+
+            disableAppLibrary,
 
             [[Package alloc] initWithIdentifier:@"com.darksword.disable-icon-flyin"
                                            name:@"Disable Icon Fly-In"

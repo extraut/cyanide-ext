@@ -50,8 +50,8 @@
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.statusLabel.text = @"Exploit running — recommended to wait here until complete.";
-    self.statusLabel.font = [UIFont systemFontOfSize:13.0];
-    self.statusLabel.textColor = [UIColor.whiteColor colorWithAlphaComponent:0.72];
+    self.statusLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
+    self.statusLabel.textColor = [UIColor.whiteColor colorWithAlphaComponent:0.60];
     self.statusLabel.numberOfLines = 1;
     self.statusLabel.adjustsFontSizeToFitWidth = YES;
     self.statusLabel.minimumScaleFactor = 0.8;
@@ -109,9 +109,10 @@
     self.statusLabel.text = message.length
         ? message
         : (success ? @"Done. All tweaks applied in-session." : @"Failed. Check the log for details.");
+    self.statusLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
     self.statusLabel.textColor = success
-        ? [UIColor colorWithRed:0.45 green:0.85 blue:0.55 alpha:1.0]
-        : [UIColor colorWithRed:1.0 green:0.42 blue:0.35 alpha:1.0];
+        ? [UIColor colorWithRed:0.38 green:0.90 blue:0.55 alpha:1.0]
+        : [UIColor colorWithRed:1.0 green:0.38 blue:0.32 alpha:1.0];
     self.title = success ? @"Complete" : @"Failed";
     self.hideOrDoneButton.title = @"Done";
 }

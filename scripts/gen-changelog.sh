@@ -31,6 +31,12 @@
 #                              PENDING_MSG. Used by release.sh to inject heuristically
 #                              derived bullets (new tweak files, new packages) so a
 #                              one-line MSG still produces a multi-bullet entry.
+#   CHANGELOG_PENDING_SKIP_LOG set to 1 to skip BASE..HEAD commit subjects for
+#                              the pending entry. Used when RELEASE_NOTES.md or
+#                              auto-derived bullets are the intended source.
+#   CHANGELOG_RELEASE_NOTES_FILE defaults to RELEASE_NOTES.md. Checked bullets
+#                              under "### vX.Y.Z" in its Released section
+#                              replace commit subjects for matching tags.
 #
 # Invoked from scripts/release.sh before xcodebuild. The output is gitignored —
 # regenerated each release, never committed.
@@ -45,6 +51,8 @@ PENDING_VERSION="${CHANGELOG_PENDING_VERSION:-}"
 PENDING_BASE="${CHANGELOG_PENDING_BASE:-}"
 PENDING_MSG="${CHANGELOG_PENDING_MSG:-}"
 PENDING_EXTRA="${CHANGELOG_PENDING_EXTRA:-}"
+PENDING_SKIP_LOG="${CHANGELOG_PENDING_SKIP_LOG:-0}"
+RELEASE_NOTES_FILE="${CHANGELOG_RELEASE_NOTES_FILE:-RELEASE_NOTES.md}"
 
 xml_escape() {
     # &  <  >  only — strings inside <string> tags don't need quote escaping.
@@ -64,6 +72,24 @@ emit_change_line() {
     local escaped
     escaped="$(printf '%s' "$subj" | xml_escape)"
     echo "      <string>${escaped}</string>"
+}
+
+released_notes_for_version() {
+    local version="$1"
+    [ -f "$RELEASE_NOTES_FILE" ] || return 0
+    awk -v wanted="v${version}" '
+        /^###[[:space:]]+/ {
+            if (in_version) exit
+            heading = $0
+            sub(/^###[[:space:]]+/, "", heading)
+            split(heading, parts, /[[:space:]]+/)
+            if (parts[1] == wanted) in_version = 1
+            next
+        }
+        in_version && /^##[[:space:]]+/ { exit }
+        in_version { print }
+    ' "$RELEASE_NOTES_FILE" \
+        | sed -nE 's/^-+[[:space:]]+\[[xX]\][[:space:]]+(.+[^[:space:]])[[:space:]]*$/\1/p'
 }
 
 # Pull the most-recent N release tags. If git isn't usable here (e.g. a
@@ -120,7 +146,9 @@ trap 'rm -f "$TMP"' EXIT
         echo "    <key>date</key><string>${TODAY}</string>"
         echo "    <key>changes</key>"
         echo "    <array>"
-        if [ -n "$PENDING_BASE" ] && git rev-parse -q --verify "refs/tags/${PENDING_BASE}" >/dev/null; then
+        if [ "$PENDING_SKIP_LOG" != "1" ] &&
+           [ -n "$PENDING_BASE" ] &&
+           git rev-parse -q --verify "refs/tags/${PENDING_BASE}" >/dev/null; then
             while IFS= read -r SUBJ; do
                 emit_change_line "$SUBJ"
             done < <(git log --reverse --no-merges --pretty=tformat:%s "${PENDING_BASE}..HEAD" 2>/dev/null)
@@ -162,15 +190,22 @@ trap 'rm -f "$TMP"' EXIT
         echo "    <key>date</key><string>$(printf '%s' "$DATE" | xml_escape)</string>"
         echo "    <key>changes</key>"
         echo "    <array>"
-        # %s gives commit subject only. --reverse so oldest-first within the
-        # tag — reads naturally as "we added X, then fixed Y, then shipped".
-        # tformat (trailing newline) so single-commit ranges aren't dropped by
-        # `read` hitting EOF before seeing a newline. Process substitution
-        # (rather than a pipe) keeps the loop in the parent shell, so a
-        # single-line `read` failure doesn't trigger pipefail mid-build.
-        while IFS= read -r SUBJ; do
-            emit_change_line "$SUBJ"
-        done < <(git log --reverse --no-merges --pretty=tformat:%s "$RANGE" 2>/dev/null)
+        RELEASED_NOTES="$(released_notes_for_version "$VERSION")"
+        if [ -n "$RELEASED_NOTES" ]; then
+            while IFS= read -r SUBJ; do
+                emit_change_line "$SUBJ"
+            done <<< "$RELEASED_NOTES"
+        else
+            # %s gives commit subject only. --reverse so oldest-first within
+            # the tag — reads naturally as "we added X, then fixed Y, then
+            # shipped". tformat (trailing newline) so single-commit ranges
+            # aren't dropped by `read` hitting EOF before seeing a newline.
+            # Process substitution keeps the loop in the parent shell, so a
+            # single-line `read` failure doesn't trigger pipefail mid-build.
+            while IFS= read -r SUBJ; do
+                emit_change_line "$SUBJ"
+            done < <(git log --reverse --no-merges --pretty=tformat:%s "$RANGE" 2>/dev/null)
+        fi
         echo "    </array>"
         echo "  </dict>"
     done

@@ -630,6 +630,7 @@ static NSString * const kTipsExpandedDefault    = @"installer.tipsExpanded";
     pill.frame = frame;
 
     pill.layer.cornerRadius = frame.size.height / 2.0;
+    pill.layer.cornerCurve = kCACornerCurveContinuous;
     pill.layer.masksToBounds = YES;
     return pill;
 }

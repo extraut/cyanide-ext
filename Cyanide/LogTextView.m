@@ -359,10 +359,10 @@ static UIColor *colorForLogLine(NSString *line) {
 
 - (void)setup {
     self.editable   = NO;
-    self.font       = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+    self.font       = [UIFont monospacedSystemFontOfSize:12.5 weight:UIFontWeightRegular];
     self.backgroundColor = [UIColor colorWithRed:0.02 green:0.05 blue:0.06 alpha:1.0];
     self.textColor  = UIColor.whiteColor;
-    self.textContainerInset = UIEdgeInsetsMake(12, 10, 12, 10);
+    self.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
     self.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAlways;
     _followTail = YES;
 

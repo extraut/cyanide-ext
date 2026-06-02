@@ -30,14 +30,22 @@
 {
     self.backgroundColor = UIColor.clearColor;
     self.layer.cornerRadius = 16.0;
-    self.layer.masksToBounds = YES;
+    self.layer.cornerCurve = kCACornerCurveContinuous;
+    self.layer.masksToBounds = NO;
     self.layer.borderWidth = 0.5;
     self.layer.borderColor = [UIColor.separatorColor colorWithAlphaComponent:0.5].CGColor;
+    self.layer.shadowColor = UIColor.blackColor.CGColor;
+    self.layer.shadowOpacity = 0.12;
+    self.layer.shadowRadius = 12.0;
+    self.layer.shadowOffset = CGSizeMake(0, 4);
 
     UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial];
     UIVisualEffectView *blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
     blurView.translatesAutoresizingMaskIntoConstraints = NO;
     blurView.userInteractionEnabled = NO;
+    blurView.layer.cornerRadius = 16.0;
+    blurView.layer.cornerCurve = kCACornerCurveContinuous;
+    blurView.clipsToBounds = YES;
     [self addSubview:blurView];
     self.blurView = blurView;
 

@@ -40,6 +40,7 @@
 		FBEF02242FAC52BF005E14B9 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
 		FBEF03482FAC52D5005E14B9 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
 		FBFA38382FB68E0600B9F081 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
+		FBFECAA52FCF1D67006A02BE /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -302,6 +303,13 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		FBFECADC2FCF1D67006A02BE /* Products */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -357,8 +365,8 @@
 			projectDirPath = "";
 			projectReferences = (
 				{
-					ProductGroup = AA73F7C72F7BC6CB00134C31 /* Products */;
-					ProjectRef = AA73F7982F7BC6CB00134C31 /* ChOma.xcodeproj */;
+					ProductGroup = FBA376492FB7FE5600886898 /* Products */;
+					ProjectRef = FBA376182FB7FE5600886898 /* ChOma.xcodeproj */;
 				},
 				{
 					ProductGroup = FBEF03792FAC52D5005E14B9 /* Products */;
@@ -417,6 +425,10 @@
 					ProjectRef = FBFA38382FB68E0600B9F081 /* ChOma.xcodeproj */;
 				},
 				{
+					ProductGroup = FBFECADC2FCF1D67006A02BE /* Products */;
+					ProjectRef = FBFECAA52FCF1D67006A02BE /* ChOma.xcodeproj */;
+				},
+				{
 					ProductGroup = FBBF22B02FAE5E7E00AF5849 /* Products */;
 					ProjectRef = FBBF227D2FAE5E7E00AF5849 /* ChOma.xcodeproj */;
 				},
@@ -433,8 +445,8 @@
 					ProjectRef = FB5948FE2FC0DFEA006FB8AE /* ChOma.xcodeproj */;
 				},
 				{
-					ProductGroup = FBA376492FB7FE5600886898 /* Products */;
-					ProjectRef = FBA376182FB7FE5600886898 /* ChOma.xcodeproj */;
+					ProductGroup = AA73F7C72F7BC6CB00134C31 /* Products */;
+					ProjectRef = AA73F7982F7BC6CB00134C31 /* ChOma.xcodeproj */;
 				},
 			);
 			projectRoot = "";
@@ -492,9 +504,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1001021;
+				CURRENT_PROJECT_VERSION = 1001022;
 				DEVELOPMENT_ASSET_PATHS = "";
-				DEVELOPMENT_TEAM = 7LGY4NE2VM;
+				DEVELOPMENT_TEAM = 8NAXVXSYWF;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -520,7 +532,7 @@
 					"$(PROJECT_DIR)/Cyanide/XPF/external/ChOma/external/ios",
 					"$(PROJECT_DIR)/Cyanide/resident/output",
 				);
-				MARKETING_VERSION = 1.1.21;
+				MARKETING_VERSION = 1.1.22;
 				OTHER_CFLAGS = "";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.zeroxjf.ios-cyanide1";
 				PRODUCT_NAME = Cyanide;
@@ -542,9 +554,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1001021;
+				CURRENT_PROJECT_VERSION = 1001022;
 				DEVELOPMENT_ASSET_PATHS = "";
-				DEVELOPMENT_TEAM = 7LGY4NE2VM;
+				DEVELOPMENT_TEAM = 8NAXVXSYWF;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -570,7 +582,7 @@
 					"$(PROJECT_DIR)/Cyanide/XPF/external/ChOma/external/ios",
 					"$(PROJECT_DIR)/Cyanide/resident/output",
 				);
-				MARKETING_VERSION = 1.1.21;
+				MARKETING_VERSION = 1.1.22;
 				OTHER_CFLAGS = "";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.zeroxjf.ios-cyanide1";
 				PRODUCT_NAME = Cyanide;

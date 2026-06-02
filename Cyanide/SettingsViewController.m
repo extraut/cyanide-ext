@@ -1485,11 +1485,16 @@ static BOOL settings_dark_tweaks_any_enabled(NSUserDefaults *d)
            [d boolForKey:kSettingsDSDragCoefficientEnabled];
 }
 
-static bool settings_apply_dark_tweaks_from_defaults_locked(NSUserDefaults *d)
-{
-    if (!settings_dark_tweaks_any_enabled(d)) return false;
+typedef struct {
+    bool any;
+    bool disableAppLibrary;
+    bool disableIconFlyIn;
+    bool zeroWakeAnimation;
+    bool zeroBacklightFade;
+    bool doubleTapToLock;
+} SettingsDarkTweaksResult;
 
-    bool ok = darksword_tweaks_apply_in_session([d boolForKey:kSettingsDSDisableAppLibrary],
+bool ok = darksword_tweaks_apply_in_session([d boolForKey:kSettingsDSDisableAppLibrary],
                                                [d boolForKey:kSettingsDSDisableIconFlyIn],
                                                [d boolForKey:kSettingsDSZeroWakeAnimation],
                                                [d boolForKey:kSettingsDSZeroBacklightFade],
@@ -3280,7 +3285,7 @@ static void settings_schedule_live_apply_for_key(NSString *key)
         dispatch_async(dispatch_get_global_queue(0, 0), ^{
             @synchronized (settings_rc_lock()) {
                 if (settings_cleanup_in_progress() || !g_springboard_rc_ready) return;
-                bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
+bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                 for (NSString *darkKey in @[
                     kSettingsDSDisableAppLibrary,
                     kSettingsDSDisableIconFlyIn,
@@ -3645,7 +3650,7 @@ void settings_run_actions(void)
 
                     if (runDarkTweaks) {
                         settings_progress(&step, total, "Applying DarkSword runtime hooks");
-                        bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
+bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         for (NSString *key in @[
                             kSettingsDSDisableAppLibrary,
                             kSettingsDSDisableIconFlyIn,

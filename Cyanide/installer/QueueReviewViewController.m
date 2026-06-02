@@ -43,9 +43,9 @@ typedef NS_ENUM(NSInteger, QueueReviewSection) {
 
     self.emptyLabel = [[UILabel alloc] init];
     self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.emptyLabel.text = @"No pending changes.\nQueue packages from the Installer tab.";
-    self.emptyLabel.font = [UIFont systemFontOfSize:16.0];
-    self.emptyLabel.textColor = UIColor.secondaryLabelColor;
+    self.emptyLabel.text = @"No pending changes\nQueue packages from the Installer tab";
+    self.emptyLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightMedium];
+    self.emptyLabel.textColor = UIColor.tertiaryLabelColor;
     self.emptyLabel.textAlignment = NSTextAlignmentCenter;
     self.emptyLabel.numberOfLines = 0;
     [self.view addSubview:self.emptyLabel];
@@ -88,23 +88,32 @@ typedef NS_ENUM(NSInteger, QueueReviewSection) {
     UIView *container = [[UIView alloc] init];
     container.backgroundColor = UIColor.systemGroupedBackgroundColor;
 
-    self.confirmButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *confirmCfg = [UIButtonConfiguration filledButtonConfiguration];
+    confirmCfg.title = @"Confirm";
+    confirmCfg.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+    confirmCfg.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey,id> *(NSDictionary<NSAttributedStringKey,id> *incoming) {
+        NSMutableDictionary *attrs = [incoming mutableCopy];
+        attrs[NSFontAttributeName] = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
+        return attrs;
+    };
+    self.confirmButton = [UIButton buttonWithConfiguration:confirmCfg primaryAction:[UIAction actionWithHandler:^(UIAction *_) {
+        [self didTapConfirm];
+    }]];
     self.confirmButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.confirmButton setTitle:@"Confirm" forState:UIControlStateNormal];
-    [self.confirmButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    self.confirmButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
-    self.confirmButton.backgroundColor = self.view.tintColor;
-    self.confirmButton.layer.cornerRadius = 12.0;
-    self.confirmButton.layer.masksToBounds = YES;
-    [self.confirmButton addTarget:self action:@selector(didTapConfirm) forControlEvents:UIControlEventTouchUpInside];
     [container addSubview:self.confirmButton];
 
-    self.clearButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *clearCfg = [UIButtonConfiguration plainButtonConfiguration];
+    clearCfg.title = @"Clear Queue";
+    clearCfg.baseForegroundColor = UIColor.systemRedColor;
+    clearCfg.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey,id> *(NSDictionary<NSAttributedStringKey,id> *incoming) {
+        NSMutableDictionary *attrs = [incoming mutableCopy];
+        attrs[NSFontAttributeName] = [UIFont systemFontOfSize:14.0 weight:UIFontWeightMedium];
+        return attrs;
+    };
+    self.clearButton = [UIButton buttonWithConfiguration:clearCfg primaryAction:[UIAction actionWithHandler:^(UIAction *_) {
+        [self didTapClear];
+    }]];
     self.clearButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.clearButton setTitle:@"Clear Queue" forState:UIControlStateNormal];
-    [self.clearButton setTitleColor:UIColor.systemRedColor forState:UIControlStateNormal];
-    self.clearButton.titleLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightRegular];
-    [self.clearButton addTarget:self action:@selector(didTapClear) forControlEvents:UIControlEventTouchUpInside];
     [container addSubview:self.clearButton];
 
     [NSLayoutConstraint activateConstraints:@[
@@ -127,17 +136,19 @@ typedef NS_ENUM(NSInteger, QueueReviewSection) {
     self.emptyLabel.hidden = (count > 0);
     self.tableView.hidden = (count == 0);
     self.confirmButton.enabled = (count > 0);
-    self.confirmButton.alpha = (count > 0) ? 1.0 : 0.4;
     self.clearButton.enabled = (count > 0);
-    self.clearButton.alpha = (count > 0) ? 1.0 : 0.4;
 
+    NSString *confirmTitle;
     if (count == 1) {
-        [self.confirmButton setTitle:@"Confirm 1 Change" forState:UIControlStateNormal];
+        confirmTitle = @"Confirm 1 Change";
     } else if (count > 1) {
-        [self.confirmButton setTitle:[NSString stringWithFormat:@"Confirm %ld Changes", (long)count] forState:UIControlStateNormal];
+        confirmTitle = [NSString stringWithFormat:@"Confirm %ld Changes", (long)count];
     } else {
-        [self.confirmButton setTitle:@"Confirm" forState:UIControlStateNormal];
+        confirmTitle = @"Confirm";
     }
+    UIButtonConfiguration *cfg = self.confirmButton.configuration;
+    cfg.title = confirmTitle;
+    self.confirmButton.configuration = cfg;
 }
 
 - (void)queueChanged:(NSNotification *)note

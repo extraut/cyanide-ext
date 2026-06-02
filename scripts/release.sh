@@ -19,9 +19,9 @@
 # CFBundleShortVersionString, CFBundleVersion, the IPA filename, and the GitHub
 # release tag all flow from the bumped version.
 #
-# Release notes default to the commit *subject only* (first line) — so the
-# Releases page stays terse. Pass a second arg or NOTES_FILE for a richer
-# changelog.
+# Release notes default to auto-derived dirty-state bullets when possible,
+# falling back to the commit subject when the script cannot infer good detail.
+# Pass a second arg, NOTES, or NOTES_FILE to override the generated notes.
 #
 # Requires: git, gh (authenticated), xcodebuild.
 
@@ -42,6 +42,7 @@ MSG="${1:-}"
 NOTES_ARG="${2:-}"
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 PBXPROJ="Cyanide.xcodeproj/project.pbxproj"
+RELEASE_NOTES_FILE="RELEASE_NOTES.md"
 
 # --- versioning -------------------------------------------------------------
 
@@ -108,11 +109,166 @@ compute_new_version() {
     echo "${major}.${minor}.${patch}"
 }
 
+parent_tree_dirty() {
+    if ! git diff-index --quiet HEAD --; then
+        return 0
+    fi
+    if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+        return 0
+    fi
+    return 1
+}
+
+submodule_paths() {
+    git config --file .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null \
+        | awk '{print $2}'
+}
+
+submodule_is_dirty() {
+    local path="$1"
+    git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+    if ! git -C "$path" diff-index --quiet HEAD --; then
+        return 0
+    fi
+    if [ -n "$(git -C "$path" ls-files --others --exclude-standard)" ]; then
+        return 0
+    fi
+    return 1
+}
+
+dirty_submodule_paths() {
+    local path
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        if submodule_is_dirty "$path"; then
+            printf '%s\n' "$path"
+        fi
+    done < <(submodule_paths)
+}
+
+pending_release_note_bullets() {
+    [ -f "$RELEASE_NOTES_FILE" ] || return 0
+    awk '
+        /^##[[:space:]]+Pending[[:space:]]*$/ { pending = 1; next }
+        pending && /^##[[:space:]]+/ { exit }
+        pending { print }
+    ' "$RELEASE_NOTES_FILE" \
+        | sed -nE 's/^-+[[:space:]]+\[[[:space:]]\][[:space:]]+(.+[^[:space:]])[[:space:]]*$/\1/p'
+}
+
+combine_release_bullets() {
+    printf '%s\n%s\n' "${1:-}" "${2:-}" \
+        | sed -e '/^[[:space:]]*$/d' \
+        | awk '!seen[tolower($0)]++'
+}
+
+mark_pending_release_notes_released() {
+    local version="$1"
+    local release_date="$2"
+    [ -f "$RELEASE_NOTES_FILE" ] || return 0
+    python3 - "$RELEASE_NOTES_FILE" "$version" "$release_date" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+version = sys.argv[2]
+release_date = sys.argv[3]
+lines = path.read_text().splitlines()
+
+out = []
+pending = []
+in_pending = False
+for line in lines:
+    if re.match(r"^##\s+Pending\s*$", line):
+        in_pending = True
+        out.append(line)
+        continue
+    if in_pending and re.match(r"^##\s+", line):
+        in_pending = False
+    if in_pending:
+        match = re.match(r"^-\s+\[\s\]\s+(.+?)\s*$", line)
+        if match:
+            pending.append(match.group(1))
+            continue
+    out.append(line)
+
+if not pending:
+    sys.exit(0)
+
+released_index = None
+for i, line in enumerate(out):
+    if re.match(r"^##\s+Released\s*$", line):
+        released_index = i
+        break
+
+if released_index is None:
+    if out and out[-1].strip():
+        out.append("")
+    out.extend(["## Released"])
+    released_index = len(out) - 1
+
+entry = [f"### v{version} - {release_date}", ""]
+entry.extend(f"- [x] {bullet}" for bullet in pending)
+entry.append("")
+
+insert_at = released_index + 1
+while insert_at < len(out) and out[insert_at].strip() == "":
+    insert_at += 1
+
+out = out[:released_index + 1] + [""] + entry + out[insert_at:]
+path.write_text("\n".join(out).rstrip() + "\n")
+PY
+}
+
+commit_dirty_submodules() {
+    local paths="$1"
+    local path branch
+    [ -z "$paths" ] && return 0
+    if [ -z "$MSG" ]; then
+        echo "error: dirty submodule changes require a commit message." >&2
+        echo "       pass a message as the first arg, or commit/stash submodule changes." >&2
+        exit 1
+    fi
+
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        submodule_is_dirty "$path" || continue
+
+        branch=$(git -C "$path" rev-parse --abbrev-ref HEAD)
+        if [ "$branch" = "HEAD" ]; then
+            echo "error: submodule $path is on a detached HEAD; cannot push dirty changes safely." >&2
+            exit 1
+        fi
+
+        echo "==> committing dirty submodule $path on $branch"
+        git -C "$path" add -A
+        if ! git -C "$path" diff --cached --quiet; then
+            git -C "$path" commit -m "$MSG"
+        fi
+
+        echo "==> pushing submodule $path:$branch"
+        git -C "$path" push origin "$branch"
+    done <<< "$paths"
+}
+
 # Snapshot dirty state *before* the bump so we can tell apart bump-only commits
 # (auto-message OK) vs. mixed commits (user-supplied message required).
 TREE_WAS_DIRTY=0
-if ! git diff-index --quiet HEAD -- || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+DIRTY_SUBMODULES_BEFORE="$(dirty_submodule_paths)"
+DIRTY_FILES_BEFORE="$(
+    {
+        git diff --name-only --diff-filter=ACMRT HEAD -- 2>/dev/null || true
+        git ls-files --others --exclude-standard 2>/dev/null || true
+    } | sort -u
+)"
+if parent_tree_dirty || [ -n "$DIRTY_SUBMODULES_BEFORE" ]; then
     TREE_WAS_DIRTY=1
+fi
+if [ "$TREE_WAS_DIRTY" = "1" ] && [ -z "$MSG" ]; then
+    echo "error: working tree has changes but no commit message was provided." >&2
+    echo "       pass a message as the first arg, or stash changes." >&2
+    exit 1
 fi
 
 CURRENT_VERSION=$(current_marketing_version)
@@ -155,9 +311,41 @@ fi
 #     Bullets whose key already appears in MSG (case-insensitive substring)
 #     are dropped so we don't repeat the human's wording.
 compute_extra_bullets() {
-    local msg_lower out base pretty key_lower f name
+    local msg_lower out changed_files base pretty key_lower f name path sub_files
     msg_lower=$(printf '%s' "$MSG" | tr '[:upper:]' '[:lower:]')
     out=""
+    changed_files="$DIRTY_FILES_BEFORE"
+
+    add_bullet() {
+        local bullet="$1"
+        local key="${2:-$1}"
+        local key_lower out_lower
+        key_lower=$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')
+        if [ -n "$msg_lower" ] && printf '%s' "$msg_lower" | grep -Fq "$key_lower"; then
+            return
+        fi
+        out_lower=$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')
+        if printf '%s' "$out_lower" | grep -Fq "$key_lower"; then
+            return
+        fi
+        out+="$bullet"$'\n'
+    }
+
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        sub_files="$(
+            {
+                git -C "$path" diff --name-only --diff-filter=ACMRT HEAD -- 2>/dev/null || true
+                git -C "$path" ls-files --others --exclude-standard 2>/dev/null || true
+            } | sort -u
+        )"
+        if [ "$path" = "Cyanide/tweaks/private" ] &&
+           printf '%s\n' "$sub_files" | grep -Fxq 'stagestrip.m'; then
+            add_bullet "Reduce Dynamic Stage Strip flicker during resize and app transitions" "Dynamic Stage Strip"
+        else
+            add_bullet "Update $(basename "$path") submodule" "$(basename "$path") submodule"
+        fi
+    done <<< "$DIRTY_SUBMODULES_BEFORE"
 
     while IFS= read -r f; do
         [ -z "$f" ] && continue
@@ -169,51 +357,65 @@ compute_extra_bullets() {
             killallapps)       continue ;;     # disabled in UI; don't advertise
             *)                 pretty="$base" ;;
         esac
-        key_lower=$(printf '%s' "$pretty" | tr '[:upper:]' '[:lower:]')
-        if [ -n "$msg_lower" ] && printf '%s' "$msg_lower" | grep -Fq "$key_lower"; then
-            continue
-        fi
-        out+="Add ${pretty} tweak"$'\n'
+        add_bullet "Add ${pretty} tweak" "$pretty"
     done < <(git ls-files --others --exclude-standard 2>/dev/null \
              | grep -E '^Cyanide/tweaks/.*\.m$' || true)
 
     while IFS= read -r name; do
         [ -z "$name" ] && continue
-        key_lower=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
-        if [ -n "$msg_lower" ] && printf '%s' "$msg_lower" | grep -Fq "$key_lower"; then
-            continue
-        fi
-        if printf '%s' "$out" | tr '[:upper:]' '[:lower:]' | grep -Fq "$key_lower"; then
-            continue
-        fi
-        out+="Add ${name} package"$'\n'
+        add_bullet "Add ${name} package" "$name"
     done < <(git diff --no-color -- Cyanide/installer/PackageCatalog.m 2>/dev/null \
              | grep -E '^\+[[:space:]]+name:@"' \
              | sed -E 's/^\+[[:space:]]+name:@"([^"]+)".*/\1/' \
              | head -10)
 
+    if printf '%s\n' "$changed_files" | grep -Eq '^Cyanide/installer/'; then
+        add_bullet "Polish package installer queue, badges, and activity status UI" "installer"
+    fi
+    if printf '%s\n' "$changed_files" | grep -Fxq 'Cyanide/SettingsViewController.m'; then
+        add_bullet "Track DarkSword toggle apply results independently in Settings" "settings"
+    fi
+    if printf '%s\n' "$changed_files" | grep -Fxq 'Cyanide/LogTextView.m'; then
+        add_bullet "Tighten Log tab typography for dense verbose traces" "log view"
+    fi
+    if printf '%s\n' "$changed_files" | grep -Fxq 'Cyanide/tweaks/darksword_tweaks.m'; then
+        add_bullet "Improve Disable App Library handling with an iOS 17 fallback path" "darksword"
+    fi
+    if printf '%s\n' "$changed_files" | grep -Fxq 'scripts/release.sh'; then
+        add_bullet "Capture dirty submodule commits during release packaging" "release script"
+    fi
+
     printf '%s' "$out"
 }
 
-EXTRA_BULLETS=""
+MANUAL_RELEASE_BULLETS="$(pending_release_note_bullets)"
+AUTO_RELEASE_BULLETS=""
 if [ "$TREE_WAS_DIRTY" = "1" ] && [ -z "${RELEASE_NO_AUTO_BULLETS:-}" ]; then
-    EXTRA_BULLETS="$(compute_extra_bullets)"
+    AUTO_RELEASE_BULLETS="$(compute_extra_bullets)"
 fi
+EXTRA_BULLETS="$(combine_release_bullets "$MANUAL_RELEASE_BULLETS" "$AUTO_RELEASE_BULLETS")"
 if [ -n "$EXTRA_BULLETS" ]; then
-    echo "==> auto-derived changelog bullets:"
+    echo "==> release-note bullets:"
     printf '%s' "$EXTRA_BULLETS" | sed 's/^/      - /'
 fi
 
 # 1b. Regenerate Cyanide/Changelog.plist with the new version as the top entry,
 #     so the IPA we're about to build carries its own "What's New" content.
 #     Commits between the last release tag and HEAD become the changes list,
-#     plus the auto-derived EXTRA_BULLETS and the about-to-be-made release
-#     commit subject (if any) — pure "Bump …" lines are filtered as noise.
+#     plus the auto-derived EXTRA_BULLETS. If no richer bullets are available,
+#     the about-to-be-made release commit subject is used as the fallback.
 LAST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+CHANGELOG_MSG="$MSG"
+CHANGELOG_SKIP_LOG=0
+if [ -n "$EXTRA_BULLETS" ] && [ -z "${RELEASE_INCLUDE_SUMMARY_IN_CHANGELOG:-}" ]; then
+    CHANGELOG_MSG=""
+    CHANGELOG_SKIP_LOG=1
+fi
 CHANGELOG_PENDING_VERSION="$NEW_VERSION" \
 CHANGELOG_PENDING_BASE="$LAST_TAG" \
-CHANGELOG_PENDING_MSG="$MSG" \
+CHANGELOG_PENDING_MSG="$CHANGELOG_MSG" \
 CHANGELOG_PENDING_EXTRA="$EXTRA_BULLETS" \
+CHANGELOG_PENDING_SKIP_LOG="$CHANGELOG_SKIP_LOG" \
     ./scripts/gen-changelog.sh \
     || echo "==> changelog generation failed (continuing without it)"
 
@@ -249,6 +451,7 @@ if [ ! -f "$IPA" ]; then
     exit 1
 fi
 EFFECTIVE_TAG="${TAG:-v${VERSION}}"
+RELEASE_DATE=$(date '+%Y-%m-%d')
 
 # 2. Refresh source.json (AltSource manifest) so AltStore/SideStore clients
 #    pull the new release automatically. Updates version, date, size,
@@ -261,7 +464,6 @@ if [ -f "$SOURCE_JSON" ]; then
         | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##' \
         | sed -E 's#\.git$##')
     DOWNLOAD_URL="https://github.com/${REPO_SLUG_FOR_JSON}/releases/download/${EFFECTIVE_TAG}/Cyanide-${VERSION}.ipa"
-    RELEASE_DATE=$(date '+%Y-%m-%d')
     echo "==> refreshing $SOURCE_JSON: version=$VERSION size=$IPA_BYTES"
     python3 - <<PY
 import json
@@ -278,6 +480,13 @@ with open(path, "w") as f:
     f.write("\n")
 PY
 fi
+
+if [ -n "$MANUAL_RELEASE_BULLETS" ]; then
+    echo "==> marking pending release notes as v$VERSION"
+    mark_pending_release_notes_released "$VERSION" "$RELEASE_DATE"
+fi
+
+commit_dirty_submodules "$DIRTY_SUBMODULES_BEFORE"
 
 # 3. Commit if there's anything to commit: pre-existing tree changes, the
 #    MARKETING_VERSION bump, or the source.json refresh.
@@ -319,19 +528,18 @@ HEAD_SHA=$(git rev-parse HEAD)
 TAG="$EFFECTIVE_TAG"
 SUBJECT=$(git log -1 --pretty=%s)
 
-# Release notes: explicit second arg > NOTES_FILE > NOTES env > commit subject
-# (plus auto-derived dirty-state bullets, if any).
+# Release notes: explicit second arg > NOTES_FILE > NOTES env > auto-derived
+# dirty-state bullets > commit subject.
 NOTES_FROM_FILE=""
 if [ -n "${NOTES_FILE:-}" ] && [ -f "${NOTES_FILE}" ]; then
     NOTES_FROM_FILE=$(cat "${NOTES_FILE}")
 fi
 NOTES_DEFAULT="$SUBJECT"
 if [ -n "$EXTRA_BULLETS" ]; then
-    NOTES_DEFAULT="${SUBJECT}
-
-$(printf '%s' "$EXTRA_BULLETS" | sed -e '/^[[:space:]]*$/d' -e 's/^/- /')"
+    NOTES_DEFAULT="$(printf '%s' "$EXTRA_BULLETS" \
+        | sed -e '/^[[:space:]]*$/d' -e 's/^/- /')"
 fi
-NOTES="${NOTES_ARG:-${NOTES:-${NOTES_FROM_FILE:-$NOTES_DEFAULT}}}"
+NOTES="${NOTES_ARG:-${NOTES_FROM_FILE:-${NOTES:-$NOTES_DEFAULT}}}"
 
 # Pin --repo to the origin push URL so gh doesn't try to create the release
 # on the upstream parent (which it prefers by default for forks).
@@ -370,7 +578,7 @@ fi
 if gh release view "$TAG" --repo "$REPO_SLUG" >/dev/null 2>&1; then
     echo "==> release $TAG already exists on $REPO_SLUG; replacing IPA asset"
     gh release upload "$TAG" "$IPA" --repo "$REPO_SLUG" --clobber
-    gh release edit "$TAG" --repo "$REPO_SLUG" --title "$RELEASE_TITLE" --latest
+    gh release edit "$TAG" --repo "$REPO_SLUG" --title "$RELEASE_TITLE" --notes "$NOTES" --latest
 else
     echo "==> creating release $TAG on $REPO_SLUG"
     gh release create "$TAG" "$IPA" \

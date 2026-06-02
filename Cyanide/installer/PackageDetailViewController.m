@@ -397,12 +397,12 @@ typedef NS_ENUM(NSInteger, PackageDetailSection) {
 
     NSMutableArray<NSLayoutConstraint *> *cs = [NSMutableArray array];
     [cs addObjectsFromArray:@[
-        [iconView.topAnchor      constraintEqualToAnchor:header.topAnchor constant:10.0],
+        [iconView.topAnchor      constraintEqualToAnchor:header.topAnchor constant:16.0],
         [iconView.centerXAnchor  constraintEqualToAnchor:header.centerXAnchor],
         [iconView.widthAnchor    constraintEqualToConstant:60.0],
         [iconView.heightAnchor   constraintEqualToConstant:54.0],
 
-        [nameLabel.topAnchor      constraintEqualToAnchor:iconView.bottomAnchor constant:8.0],
+        [nameLabel.topAnchor      constraintEqualToAnchor:iconView.bottomAnchor constant:12.0],
         [nameLabel.leadingAnchor  constraintEqualToAnchor:header.leadingAnchor constant:16.0],
         [nameLabel.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-16.0],
 
@@ -439,7 +439,8 @@ typedef NS_ENUM(NSInteger, PackageDetailSection) {
 {
     UIView *container = [[UIView alloc] init];
     container.backgroundColor = bg;
-    container.layer.cornerRadius = 11.0;
+    container.layer.cornerRadius = 12.0;
+    container.layer.cornerCurve = kCACornerCurveContinuous;
     container.layer.masksToBounds = YES;
 
     UILabel *label = [[UILabel alloc] init];
