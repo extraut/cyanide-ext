@@ -16,6 +16,7 @@
 #import "tweaks/darksword_ota.h"
 #import "tweaks/darksword_layout.h"
 #import "tweaks/nano_registry.h"
+#import "tweaks/picture_overlay.h"
 #import "tweaks/private/call_recording_sound.h"
 #import "tweaks/killallapps.h"
 #import "tweaks/private/stagestrip.h"
@@ -174,6 +175,13 @@ NSString * const kSettingsAxonLiteEnabled = @"AxonLiteEnabled";
 NSString * const kSettingsTypeBannerEnabled = @"TypeBannerEnabled";
 
 NSString * const kSettingsStageStripEnabled = @"StageStripEnabled";
+
+NSString * const kSettingsPictureOverlayEnabled = @"PictureOverlayEnabled";
+NSString * const kSettingsPictureOverlayPath = @"PictureOverlayPath";
+NSString * const kSettingsPictureOverlayOffsetX = @"PictureOverlayOffsetX";
+NSString * const kSettingsPictureOverlayOffsetY = @"PictureOverlayOffsetY";
+NSString * const kSettingsPictureOverlayScale = @"PictureOverlayScale";
+NSString * const kSettingsPictureOverlayAlpha = @"PictureOverlayAlpha";
 
 NSString * const kSettingsLocationSimEnabled = @"LocationSimEnabled";
 NSString * const kSettingsLocationSimLatitude = @"LocationSimLatitude";
@@ -620,6 +628,7 @@ static void settings_forget_springboard_tweak_state_locked(void)
     killallapps_forget_remote_state();
     stagestrip_forget_remote_state();
     themer_forget_remote_state();
+    picture_overlay_forget_remote_state();
 }
 
 static void settings_stop_springboard_tweaks_locked(const char *reason,
@@ -3047,6 +3056,16 @@ static BOOL settings_key_is_dark_tweak(NSString *key)
            [key isEqualToString:kSettingsDSDragCoefficientValue];
 }
 
+static BOOL settings_key_is_picture_overlay(NSString *key)
+{
+    return [key isEqualToString:kSettingsPictureOverlayEnabled] ||
+           [key isEqualToString:kSettingsPictureOverlayPath] ||
+           [key isEqualToString:kSettingsPictureOverlayOffsetX] ||
+           [key isEqualToString:kSettingsPictureOverlayOffsetY] ||
+           [key isEqualToString:kSettingsPictureOverlayScale] ||
+           [key isEqualToString:kSettingsPictureOverlayAlpha];
+}
+
 static BOOL settings_key_affects_package_state(NSString *key)
 {
     return [key isEqualToString:kSettingsSBCEnabled] ||
@@ -3056,7 +3075,8 @@ static BOOL settings_key_affects_package_state(NSString *key)
            [key isEqualToString:kSettingsAxonLiteEnabled] ||
            [key isEqualToString:kSettingsTypeBannerEnabled] ||
            [key isEqualToString:kSettingsThemerEnabled] ||
-           settings_key_is_dark_tweak(key);
+           settings_key_is_dark_tweak(key) ||
+           settings_key_is_picture_overlay(key);
 }
 
 static void settings_schedule_live_apply_for_key(NSString *key)
@@ -3287,7 +3307,7 @@ static void settings_schedule_live_apply_for_key(NSString *key)
         dispatch_async(dispatch_get_global_queue(0, 0), ^{
             @synchronized (settings_rc_lock()) {
                 if (settings_cleanup_in_progress() || !g_springboard_rc_ready) return;
-bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
+                bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                 for (NSString *darkKey in @[
                     kSettingsDSDisableAppLibrary,
                     kSettingsDSDisableIconFlyIn,
@@ -3302,6 +3322,37 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
             }
             settings_notify_package_queue_changed_async();
         });
+        return;
+    }
+
+    if (settings_key_is_picture_overlay(key)) {
+        if ([d boolForKey:kSettingsPictureOverlayEnabled] && g_springboard_rc_ready) {
+            dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                @synchronized (settings_rc_lock()) {
+                    if (settings_cleanup_in_progress() || !g_springboard_rc_ready) return;
+                    const char *path = [[d stringForKey:kSettingsPictureOverlayPath] UTF8String];
+                    bool ok = picture_overlay_apply_in_session(YES, path,
+                        (int)[d integerForKey:kSettingsPictureOverlayOffsetX],
+                        (int)[d integerForKey:kSettingsPictureOverlayOffsetY],
+                        (int)[d integerForKey:kSettingsPictureOverlayScale],
+                        (int)[d integerForKey:kSettingsPictureOverlayAlpha]);
+                    settings_mark_tweak_applied(kSettingsPictureOverlayEnabled,
+                                                ok && [d boolForKey:kSettingsPictureOverlayEnabled]);
+                    printf("[SETTINGS] live Picture Overlay apply result=%d\n", ok);
+                }
+                settings_notify_package_queue_changed_async();
+            });
+        } else if (![d boolForKey:kSettingsPictureOverlayEnabled]) {
+            settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, NO);
+            settings_notify_package_queue_changed_async();
+            if (g_springboard_rc_ready) {
+                dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                    @synchronized (settings_rc_lock()) {
+                        if (g_springboard_rc_ready) picture_overlay_stop_in_session();
+                    }
+                });
+            }
+        }
         return;
     }
 
@@ -3371,6 +3422,13 @@ void settings_register_defaults(void)
         kSettingsRSSIDisplayCell:    @YES,
 
         kSettingsAxonLiteEnabled: @NO,
+
+        kSettingsPictureOverlayEnabled: @NO,
+        kSettingsPictureOverlayPath: @"",
+        kSettingsPictureOverlayOffsetX: @0,
+        kSettingsPictureOverlayOffsetY: @0,
+        kSettingsPictureOverlayScale: @100,
+        kSettingsPictureOverlayAlpha: @100,
 
         kSettingsTypeBannerEnabled: @NO,
 
@@ -3468,9 +3526,10 @@ void settings_run_actions(void)
             BOOL runThemer = [d boolForKey:kSettingsThemerEnabled];
             BOOL runLayoutExtras = [d boolForKey:kSettingsLayoutExtrasEnabled];
             BOOL runStageStrip = [d boolForKey:kSettingsStageStripEnabled];
+            BOOL runPictureOverlay = [d boolForKey:kSettingsPictureOverlayEnabled] && [[d stringForKey:kSettingsPictureOverlayPath] length] > 0;
             // TypeBanner prewarms its hidden SpringBoard window during Apply
             // and reuses the open SpringBoard session for text-only updates.
-            BOOL needsSpringBoard = runSandboxEscape || runSBC || runDarkTweaks || runStatBar || runRSSI || runAxonLite || runLayoutExtras || runTypeBanner || runThemer || runStageStrip;
+            BOOL needsSpringBoard = runSandboxEscape || runSBC || runDarkTweaks || runStatBar || runRSSI || runAxonLite || runLayoutExtras || runTypeBanner || runThemer || runStageStrip || runPictureOverlay;
 
             NSUInteger total = 1;
             if (patchSandboxExt) total++;
@@ -3486,6 +3545,7 @@ void settings_run_actions(void)
             if (runAxonLite) total++;
             if (runTypeBanner) total++;
             if (runStageStrip) total++;
+            if (runPictureOverlay) total++;
             NSUInteger step = 0;
 
             settings_log_run_context();
@@ -3652,7 +3712,7 @@ void settings_run_actions(void)
 
                     if (runDarkTweaks) {
                         settings_progress(&step, total, "Applying DarkSword runtime hooks");
-bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
+                        bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         for (NSString *key in @[
                             kSettingsDSDisableAppLibrary,
                             kSettingsDSDisableIconFlyIn,
@@ -3668,6 +3728,22 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                                  ok ? "[OK]" : "[WARN]",
                                  ok ? "applied" : "may need a refresh");
                         cyanide_upload_log_milestone(ok ? @"darksword-tweaks-applied" : @"darksword-tweaks-warning");
+                    }
+
+                    if (runPictureOverlay) {
+                        settings_progress(&step, total, "Applying Picture Overlay");
+                        const char *path = [[d stringForKey:kSettingsPictureOverlayPath] UTF8String];
+                        bool ok = picture_overlay_apply_in_session(YES, path,
+                            (int)[d integerForKey:kSettingsPictureOverlayOffsetX],
+                            (int)[d integerForKey:kSettingsPictureOverlayOffsetY],
+                            (int)[d integerForKey:kSettingsPictureOverlayScale],
+                            (int)[d integerForKey:kSettingsPictureOverlayAlpha]);
+                        settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, ok);
+                        printf("[SETTINGS] Picture Overlay result=%d\n", ok);
+                        log_user("%s Picture Overlay %s.\n",
+                                 ok ? "[OK]" : "[WARN]",
+                                 ok ? "applied" : "may need a refresh");
+                        cyanide_upload_log_milestone(ok ? @"picture-overlay-applied" : @"picture-overlay-warning");
                     }
 
                     if ([d boolForKey:kSettingsLayoutExtrasEnabled]) {
