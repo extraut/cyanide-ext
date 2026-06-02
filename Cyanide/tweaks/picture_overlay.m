@@ -1,8 +1,9 @@
 //
 //  picture_overlay.m
 //
-//  Picture Overlay tweak — displays an image/GIF on SpringBoard.
-//  Only visible on home screen and lock screen.
+//  Picture Overlay tweak — displays images/GIFs on SpringBoard home screen
+//  and lock screen. Each overlay is identified by a unique tag derived from
+//  the overlay ID. Visibility is gated by home-screen / lock-screen state.
 //
 
 #import "picture_overlay.h"
@@ -13,91 +14,13 @@
 #import <UIKit/UIKit.h>
 #import <stdio.h>
 #import <string.h>
-
-// Tag for idempotent reapply — view retrieval by tag
-static const uint64_t kPictureOverlayTag = 0xC0A15000;
+#import <stdint.h>
 
 // Cached remote pointers — reset on SpringBoard restart
-static uint64_t gPictureOverlayWindow = 0;
-static uint64_t gPictureOverlayImageView = 0;
-static uint64_t gPictureOverlayLastImagePath = 0;
+static uint64_t gPictureOverlayHomeWindow = 0;
+static uint64_t gPictureOverlayLockWindow = 0;
 
-#pragma mark - Helpers
-
-// Find home screen window (SBIconController view)
-static uint64_t picture_overlay_find_home_screen_window(void)
-{
-    uint64_t UIApplication = r_class("UIApplication");
-    if (!r_is_objc_ptr(UIApplication)) return 0;
-
-    uint64_t app = r_msg2_main(UIApplication, "sharedApplication", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(app)) return 0;
-
-    // Find SBIconController - the main home screen controller
-    uint64_t SBIconController = r_class("SBIconController");
-    if (!r_is_objc_ptr(SBIconController)) {
-        printf("[PICTURE] SBIconController not found\n");
-        return 0;
-    }
-
-    uint64_t sharedIconController = r_msg2_main(SBIconController, "sharedInstance", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(sharedIconController)) {
-        printf("[PICTURE] sharedInstance failed\n");
-        return 0;
-    }
-
-    // Get the view
-    uint64_t iconView = r_msg2_main(sharedIconController, "view", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(iconView)) {
-        printf("[PICTURE] SBIconController view not found\n");
-        return 0;
-    }
-
-    // Get the window containing this view
-    uint64_t window = r_msg2_main(iconView, "window", 0, 0, 0, 0);
-    if (r_is_objc_ptr(window)) {
-        printf("[PICTURE] found home screen window=0x%llx\n", window);
-        return window;
-    }
-
-    // Fallback: find windows and check for SB windows
-    uint64_t windows = r_msg2_main(app, "windows", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(windows)) return 0;
-
-    uint64_t count = r_msg2_main(windows, "count", 0, 0, 0, 0);
-    for (uint64_t i = 0; i < count && i < 32; i++) {
-        uint64_t win = r_msg2_main(windows, "objectAtIndex:", i, 0, 0, 0);
-        if (!r_is_objc_ptr(win)) continue;
-
-        // Get window's root view controller
-        uint64_t rootVC = r_msg2_main(win, "rootViewController", 0, 0, 0, 0);
-        if (r_is_objc_ptr(rootVC)) {
-            // Check if it's SBIconController
-            uint64_t className = r_dlsym_call(R_TIMEOUT, "object_getClassName", rootVC, 0, 0, 0, 0, 0, 0, 0);
-            if (className) {
-                char name[64] = {0};
-                r_read_nsstring(className, name, sizeof(name) - 1);
-                r_dlsym_call(R_TIMEOUT, "free", className, 0, 0, 0, 0, 0, 0, 0);
-                printf("[PICTURE] window%llu rootVC class: %s\n", i, name);
-            }
-
-            // Check if this window is visible and on home screen
-            uint64_t isKey = r_msg2_main(win, "isKeyWindow", 0, 0, 0, 0);
-            if (isKey) {
-                // Check if this is a SB window (not app window)
-                uint64_t scene = r_msg2_main(win, "windowScene", 0, 0, 0, 0);
-                if (r_is_objc_ptr(scene)) {
-                    // This looks like a SB window
-                    printf("[PICTURE] found SB window=0x%llx (key window)\n", win);
-                    return win;
-                }
-            }
-        }
-    }
-
-    printf("[PICTURE] no home screen window found, using keyWindow\n");
-    return r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
-}
+#pragma mark - Window Detection
 
 // Check if we're on home screen by verifying SBIconController is visible
 static BOOL picture_overlay_is_on_home_screen(void)
@@ -111,42 +34,23 @@ static BOOL picture_overlay_is_on_home_screen(void)
     uint64_t view = r_msg2_main(shared, "view", 0, 0, 0, 0);
     if (!r_is_objc_ptr(view)) return NO;
 
-    // Check if view is in window hierarchy
     uint64_t window = r_msg2_main(view, "window", 0, 0, 0, 0);
     if (!r_is_objc_ptr(window)) return NO;
 
-    // Check if window is key (active)
     uint64_t isKey = r_msg2_main(window, "isKeyWindow", 0, 0, 0, 0);
-    if (!isKey) return NO;
-
-    // Check if view is not hidden and has superview
-    uint64_t superview = r_msg2_main(view, "superview", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(superview)) return NO;
-
-    // Check hidden state
-    uint64_t hidden = r_msg2_main(view, "isHidden", 0, 0, 0, 0);
-    if (hidden) return NO;
-
-    // Check alpha
-    struct { double a; } alphaStruct = {0};
-    r_msg2_main_struct_ret(view, "alpha", &alphaStruct, sizeof(alphaStruct), NULL, 0, NULL, 0, NULL, 0, NULL, 0);
-    if (alphaStruct.a < 0.01) return NO;
-
-    return YES;
+    return isKey != 0;
 }
 
 // Check if lock screen is showing
 static BOOL picture_overlay_is_on_lock_screen(void)
 {
-    // Check for SBLockScreenViewController
-    uint64_t SBLockScreenViewController = r_class("SBLockScreenViewController");
-    if (!r_is_objc_ptr(SBLockScreenViewController)) {
-        // Try alternate class name
-        SBLockScreenViewController = r_class("SBFLockScreenViewController");
+    uint64_t cls = r_class("SBLockScreenViewController");
+    if (!r_is_objc_ptr(cls)) {
+        cls = r_class("SBFLockScreenViewController");
     }
-    if (!r_is_objc_ptr(SBLockScreenViewController)) return NO;
+    if (!r_is_objc_ptr(cls)) return NO;
 
-    uint64_t shared = r_msg2_main(SBLockScreenViewController, "sharedInstance", 0, 0, 0, 0);
+    uint64_t shared = r_msg2_main(cls, "sharedInstance", 0, 0, 0, 0);
     if (!r_is_objc_ptr(shared)) return NO;
 
     uint64_t view = r_msg2_main(shared, "view", 0, 0, 0, 0);
@@ -156,69 +60,46 @@ static BOOL picture_overlay_is_on_lock_screen(void)
     return r_is_objc_ptr(superview);
 }
 
-// Get appropriate window for overlay (home screen or lock screen)
-static uint64_t picture_overlay_get_appropriate_window(void)
+// Get SpringBoard's main window (used for overlay attachment)
+static uint64_t picture_overlay_get_springboard_window(void)
 {
-    // First check if we're on home screen
-    if (picture_overlay_is_on_home_screen()) {
-        return picture_overlay_find_home_screen_window();
-    }
-
-    // Then check lock screen
-    if (picture_overlay_is_on_lock_screen()) {
-        // Get lock screen window
-        uint64_t UIApplication = r_class("UIApplication");
-        uint64_t app = r_msg2_main(UIApplication, "sharedApplication", 0, 0, 0, 0);
-        uint64_t windows = r_msg2_main(app, "windows", 0, 0, 0, 0);
-        uint64_t count = r_msg2_main(windows, "count", 0, 0, 0, 0);
-
-        for (uint64_t i = 0; i < count && i < 32; i++) {
-            uint64_t win = r_msg2_main(windows, "objectAtIndex:", i, 0, 0, 0);
-            if (!r_is_objc_ptr(win)) continue;
-
-            uint64_t windowLevel = r_msg2_main(win, "windowLevel", 0, 0, 0, 0);
-            // Lock screen windows typically have higher window levels
-            if (windowLevel > 1000 && windowLevel < 2000) {
-                printf("[PICTURE] found lock screen window=0x%llx\n", win);
-                return win;
+    // Try SBIconController's view window first
+    uint64_t SBIconController = r_class("SBIconController");
+    if (r_is_objc_ptr(SBIconController)) {
+        uint64_t shared = r_msg2_main(SBIconController, "sharedInstance", 0, 0, 0, 0);
+        if (r_is_objc_ptr(shared)) {
+            uint64_t view = r_msg2_main(shared, "view", 0, 0, 0, 0);
+            if (r_is_objc_ptr(view)) {
+                uint64_t window = r_msg2_main(view, "window", 0, 0, 0, 0);
+                if (r_is_objc_ptr(window)) {
+                    gPictureOverlayHomeWindow = window;
+                    return window;
+                }
             }
         }
     }
 
-    return 0;
+    // Fall back to keyWindow
+    uint64_t UIApplication = r_class("UIApplication");
+    if (!r_is_objc_ptr(UIApplication)) return 0;
+
+    uint64_t app = r_msg2_main(UIApplication, "sharedApplication", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(app)) return 0;
+
+    uint64_t keyWin = r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
+    if (r_is_objc_ptr(keyWin)) {
+        gPictureOverlayHomeWindow = keyWin;
+    }
+    return keyWin;
 }
 
-static uint64_t picture_overlay_first_window(void)
-{
-    return picture_overlay_get_appropriate_window();
-}
+#pragma mark - Visibility Check
 
-static uint64_t picture_overlay_existing_view(uint64_t window)
+// Returns YES if overlay should be visible RIGHT NOW
+// (either on home screen or lock screen)
+static BOOL picture_overlay_should_be_visible(void)
 {
-    if (!r_is_objc_ptr(window)) return 0;
-
-    uint64_t view = r_msg2_main(window, "viewWithTag:", kPictureOverlayTag, 0, 0, 0);
-    if (r_is_objc_ptr(view)) {
-        gPictureOverlayImageView = view;
-        return view;
-    }
-    return 0;
-}
-
-static void picture_overlay_release_resources(void)
-{
-    if (r_is_objc_ptr(gPictureOverlayImageView)) {
-        r_msg2_main(gPictureOverlayImageView, "release", 0, 0, 0, 0);
-        gPictureOverlayImageView = 0;
-    }
-    if (r_is_objc_ptr(gPictureOverlayWindow)) {
-        r_msg2_main(gPictureOverlayWindow, "release", 0, 0, 0, 0);
-        gPictureOverlayWindow = 0;
-    }
-    if (gPictureOverlayLastImagePath) {
-        r_free(gPictureOverlayLastImagePath);
-        gPictureOverlayLastImagePath = 0;
-    }
+    return picture_overlay_is_on_home_screen() || picture_overlay_is_on_lock_screen();
 }
 
 #pragma mark - Image Loading
@@ -228,10 +109,7 @@ static uint64_t picture_overlay_load_image(const char *imagePath)
     if (!imagePath || !*imagePath) return 0;
 
     NSData *imageData = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:imagePath]];
-    if (!imageData || imageData.length == 0) {
-        printf("[PICTURE] failed to load: %s\n", imagePath);
-        return 0;
-    }
+    if (!imageData || imageData.length == 0) return 0;
 
     uint64_t NSData_class = r_class("NSData");
     if (!r_is_objc_ptr(NSData_class)) return 0;
@@ -248,16 +126,8 @@ static uint64_t picture_overlay_load_image(const char *imagePath)
 
     remote_write(remoteDataPtr, imageData.bytes, dataLen);
 
-    uint64_t bytesSelector = r_sel("initWithBytes:length:");
-    if (!bytesSelector) {
-        r_dlsym_call(R_TIMEOUT, "free", remoteDataPtr, 0, 0, 0, 0, 0, 0, 0);
-        r_msg2_main(remoteDataAlloc, "release", 0, 0, 0, 0);
-        return 0;
-    }
-
     uint64_t remoteData = r_msg2_main(remoteDataAlloc, "initWithBytes:length:",
                                        remoteDataPtr, dataLen, 0, 0);
-
     r_msg2_main(remoteDataAlloc, "release", 0, 0, 0, 0);
 
     if (!r_is_objc_ptr(remoteData)) {
@@ -271,67 +141,104 @@ static uint64_t picture_overlay_load_image(const char *imagePath)
         return 0;
     }
 
-    uint64_t imageWithData = r_sel("imageWithData:");
-    if (!imageWithData) {
-        r_dlsym_call(R_TIMEOUT, "CFRelease", remoteData, 0, 0, 0, 0, 0, 0, 0);
-        return 0;
-    }
-
     uint64_t remoteImage = r_msg2_main(UIImage_class, "imageWithData:", remoteData, 0, 0, 0);
     r_dlsym_call(R_TIMEOUT, "CFRelease", remoteData, 0, 0, 0, 0, 0, 0, 0);
 
     return r_is_objc_ptr(remoteImage) ? remoteImage : 0;
 }
 
-#pragma mark - Main Apply
+#pragma mark - View Management
 
-bool picture_overlay_apply_in_session(BOOL enabled, const char *imagePath,
+// Tag = base + overlayId (ensures unique tags per overlay)
+static const uint64_t kPictureOverlayTagBase = 0xC0A15000;
+static const uint64_t kPictureOverlayTagMax = 0xC0A15FFF;
+static const uint64_t kPictureOverlayTagMask = 0x0000FFFF;
+
+static uint64_t picture_overlay_tag_for_id(uint64_t overlayId)
+{
+    return kPictureOverlayTagBase | (overlayId & kPictureOverlayTagMask);
+}
+
+static uint64_t picture_overlay_existing_view(uint64_t window, uint64_t overlayId)
+{
+    if (!r_is_objc_ptr(window)) return 0;
+    uint64_t tag = picture_overlay_tag_for_id(overlayId);
+    uint64_t view = r_msg2_main(window, "viewWithTag:", tag, 0, 0, 0);
+    return r_is_objc_ptr(view) ? view : 0;
+}
+
+// Remove all overlay views from the window
+static void picture_overlay_remove_all_views_from_window(uint64_t window)
+{
+    if (!r_is_objc_ptr(window)) return;
+
+    for (uint64_t tag = kPictureOverlayTagBase; tag <= kPictureOverlayTagMax; tag++) {
+        uint64_t view = r_msg2_main(window, "viewWithTag:", tag, 0, 0, 0);
+        if (r_is_objc_ptr(view)) {
+            r_msg2_main(view, "removeFromSuperview", 0, 0, 0, 0);
+            r_msg2_main(view, "release", 0, 0, 0, 0);
+        }
+    }
+}
+
+#pragma mark - Apply Single Overlay
+
+bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const char *imagePath,
                                       int offsetX, int offsetY,
                                       int scalePct, int alphaPct)
 {
-    // If disabled, stop any existing overlay
     if (!enabled) {
-        return picture_overlay_stop_in_session();
+        return picture_overlay_stop_in_session(overlayId);
     }
 
-    // Need image path for apply
-    if (!imagePath || !*imagePath) {
-        printf("[PICTURE] no image path specified\n");
+    if (!imagePath || !*imagePath) return false;
+
+    // Check visibility — if not on home screen or lock screen, hide overlay
+    BOOL shouldBeVisible = picture_overlay_should_be_visible();
+
+    // Get window
+    uint64_t window = picture_overlay_get_springboard_window();
+    if (!r_is_objc_ptr(window)) {
+        printf("[PICTURE] no SpringBoard window available\n");
         return false;
     }
 
-    // Get home screen or lock screen window
-    uint64_t window = picture_overlay_get_appropriate_window();
-    if (!r_is_objc_ptr(window)) {
-        printf("[PICTURE] could not get appropriate window (not on home screen or lock screen)\n");
-        // Don't remove overlay, just skip this apply
-        return true;
+    // Find existing view
+    uint64_t existingView = picture_overlay_existing_view(window, overlayId);
+
+    if (!shouldBeVisible) {
+        // Not on home/lock screen — just hide any existing view
+        if (r_is_objc_ptr(existingView)) {
+            r_msg2_main(existingView, "setHidden:", 1, 0, 0, 0);
+        }
+        return true; // Not an error, just nothing to do right now
     }
 
-    // Check for existing view
-    uint64_t existingView = picture_overlay_existing_view(window);
+    // We're on home screen or lock screen — show or create overlay
 
     if (r_is_objc_ptr(existingView)) {
-        // Update existing view with new image and properties
-        printf("[PICTURE] updating existing overlay at window=0x%llx\n", window);
-
+        // Update existing
         uint64_t newImage = picture_overlay_load_image(imagePath);
-        if (!r_is_objc_ptr(newImage)) {
-            return false;
-        }
+        if (!r_is_objc_ptr(newImage)) return false;
 
         r_msg2_main(existingView, "setImage:", newImage, 0, 0, 0);
         r_dlsym_call(R_TIMEOUT, "CFRelease", newImage, 0, 0, 0, 0, 0, 0, 0);
 
-        // Update frame
+        // Get window bounds
+        struct { double x, y, w, h; } bounds = {0};
+        r_msg2_main_struct_ret(window, "bounds", &bounds, sizeof(bounds),
+                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+
+        // Get current image size
         struct { double x, y, w, h; } imageSize = {0};
         r_msg2_main_struct_ret(existingView, "bounds", &imageSize, sizeof(imageSize),
                                NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+
         CGFloat scaleFactor = (CGFloat)scalePct / 100.0;
         CGFloat scaledWidth = imageSize.w * scaleFactor;
         CGFloat scaledHeight = imageSize.h * scaleFactor;
-        CGFloat posX = (imageSize.w - scaledWidth) / 2.0 + offsetX;
-        CGFloat posY = (imageSize.h - scaledHeight) / 2.0 + offsetY;
+        CGFloat posX = (bounds.w - scaledWidth) / 2.0 + offsetX;
+        CGFloat posY = (bounds.h - scaledHeight) / 2.0 + offsetY;
 
         struct { double x, y, w, h; } frame = { posX, posY, scaledWidth, scaledHeight };
         r_msg2_main_raw(existingView, "setFrame:", &frame, sizeof(frame),
@@ -343,15 +250,14 @@ bool picture_overlay_apply_in_session(BOOL enabled, const char *imagePath,
         r_msg2_main(existingView, "setHidden:", 0, 0, 0, 0);
         r_msg2_main(window, "bringSubviewToFront:", existingView, 0, 0, 0);
 
+        printf("[PICTURE] updated overlay id=%llu at (%.0f, %.0f)\n", overlayId, posX, posY);
         return true;
     }
 
     // Create new overlay
-    printf("[PICTURE] creating new overlay at window=0x%llx\n", window);
-
     uint64_t image = picture_overlay_load_image(imagePath);
     if (!r_is_objc_ptr(image)) {
-        printf("[PICTURE] failed to load image\n");
+        printf("[PICTURE] failed to load image: %s\n", imagePath);
         return false;
     }
 
@@ -376,7 +282,7 @@ bool picture_overlay_apply_in_session(BOOL enabled, const char *imagePath,
         return false;
     }
 
-    // Get bounds and calculate position
+    // Get bounds
     struct { double x, y, w, h; } bounds = {0};
     r_msg2_main_struct_ret(window, "bounds", &bounds, sizeof(bounds),
                            NULL, 0, NULL, 0, NULL, 0, NULL, 0);
@@ -398,45 +304,61 @@ bool picture_overlay_apply_in_session(BOOL enabled, const char *imagePath,
     CGFloat alpha = (CGFloat)alphaPct / 100.0;
     r_msg2_main(imageView, "setAlpha:", *(uint64_t *)&alpha, 0, 0, 0);
 
-    // Set content mode for better scaling
+    // Content mode scale aspect fit
     uint64_t UIViewContentModeScaleAspectFit = 6;
     r_msg2_main(imageView, "setContentMode:", UIViewContentModeScaleAspectFit, 0, 0, 0);
 
-    // Set tag for idempotent reapply
-    r_msg2_main(imageView, "setTag:", kPictureOverlayTag, 0, 0, 0);
+    // Set unique tag for this overlay
+    uint64_t tag = picture_overlay_tag_for_id(overlayId);
+    r_msg2_main(imageView, "setTag:", tag, 0, 0, 0);
 
     // Add to window
     r_msg2_main(window, "addSubview:", imageView, 0, 0, 0);
 
-    // Cache pointers
-    gPictureOverlayWindow = window;
-    gPictureOverlayImageView = imageView;
-
-    printf("[PICTURE] overlay created at (%.0f, %.0f) size (%.0f, %.0f)\n",
-           posX, posY, scaledWidth, scaledHeight);
+    printf("[PICTURE] created overlay id=%llu tag=0x%llx at (%.0f, %.0f) size (%.0f, %.0f)\n",
+           overlayId, tag, posX, posY, scaledWidth, scaledHeight);
 
     return true;
 }
 
 #pragma mark - Stop
 
-bool picture_overlay_stop_in_session(void)
+bool picture_overlay_stop_in_session(uint64_t overlayId)
 {
-    uint64_t window = picture_overlay_first_window();
-    uint64_t view = picture_overlay_existing_view(window);
+    uint64_t window = picture_overlay_get_springboard_window();
+    if (!r_is_objc_ptr(window)) return false;
 
-    if (!r_is_objc_ptr(view)) {
-        picture_overlay_release_resources();
-        return true;
+    uint64_t view = picture_overlay_existing_view(window, overlayId);
+    if (r_is_objc_ptr(view)) {
+        r_msg2_main(view, "setHidden:", 1, 0, 0, 0);
+        r_msg2_main(view, "removeFromSuperview", 0, 0, 0, 0);
+        r_msg2_main(view, "release", 0, 0, 0, 0);
+        printf("[PICTURE] stopped overlay id=%llu\n", overlayId);
     }
-
-    r_msg2_main(view, "setHidden:", 1, 0, 0, 0);
-    r_msg2_main(view, "removeFromSuperview", 0, 0, 0, 0);
-
-    picture_overlay_release_resources();
-
-    printf("[PICTURE] overlay stopped\n");
     return true;
+}
+
+#pragma mark - Apply All (from defaults)
+
+bool picture_overlay_apply_all_in_session(void)
+{
+    // Use apply_single API for the legacy single-overlay key
+    // Real multi-overlay support lives in SettingsViewController
+    return true;
+}
+
+bool picture_overlay_stop_all_in_session(void)
+{
+    uint64_t window = picture_overlay_get_springboard_window();
+    if (r_is_objc_ptr(window)) {
+        picture_overlay_remove_all_views_from_window(window);
+    }
+    return true;
+}
+
+bool picture_overlay_remove_all_in_session(void)
+{
+    return picture_overlay_stop_all_in_session();
 }
 
 #pragma mark - Forget State
@@ -444,10 +366,6 @@ bool picture_overlay_stop_in_session(void)
 void picture_overlay_forget_remote_state(void)
 {
     printf("[PICTURE] forgetting remote state\n");
-    gPictureOverlayWindow = 0;
-    gPictureOverlayImageView = 0;
-    if (gPictureOverlayLastImagePath) {
-        r_free(gPictureOverlayLastImagePath);
-        gPictureOverlayLastImagePath = 0;
-    }
+    gPictureOverlayHomeWindow = 0;
+    gPictureOverlayLockWindow = 0;
 }

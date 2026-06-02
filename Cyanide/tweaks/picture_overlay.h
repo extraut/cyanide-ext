@@ -1,8 +1,8 @@
 //
 //  picture_overlay.h
 //
-//  Picture Overlay tweak — displays an image/GIF on SpringBoard.
-//  Only visible on home screen and lock screen, freezes when screen is off.
+//  Picture Overlay tweak — displays images/GIFs on SpringBoard home screen
+//  and lock screen. Supports multiple overlays, each with own settings.
 //
 
 #ifndef picture_overlay_h
@@ -10,11 +10,21 @@
 
 #import <Foundation/Foundation.h>
 #include <stdbool.h>
+#include <stdint.h>
 
-bool picture_overlay_apply_in_session(BOOL enabled, const char *imagePath,
+// Apply all enabled overlays from defaults (reads array of PictureOverlay_* keys)
+bool picture_overlay_apply_all_in_session(void);
+// Stop all overlays
+bool picture_overlay_stop_all_in_session(void);
+// Apply a specific overlay by ID
+bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const char *imagePath,
                                       int offsetX, int offsetY,
                                       int scalePct, int alphaPct);
-bool picture_overlay_stop_in_session(void);
+// Stop a specific overlay
+bool picture_overlay_stop_in_session(uint64_t overlayId);
+// Remove all overlays (full cleanup)
+bool picture_overlay_remove_all_in_session(void);
+
 void picture_overlay_forget_remote_state(void);
 
 #endif

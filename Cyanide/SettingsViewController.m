@@ -183,6 +183,11 @@ NSString * const kSettingsPictureOverlayOffsetY = @"PictureOverlayOffsetY";
 NSString * const kSettingsPictureOverlayScale = @"PictureOverlayScale";
 NSString * const kSettingsPictureOverlayAlpha = @"PictureOverlayAlpha";
 
+// Multi-overlay list — array of overlay dicts
+// Each dict: { id: NSNumber, enabled: @YES/@NO, path: NSString, offsetX: NSNumber, ... }
+NSString * const kSettingsPictureOverlayList = @"PictureOverlayList";
+NSString * const kSettingsPictureOverlayPendingPick = @"PictureOverlayPendingPickID";
+
 NSString * const kSettingsLocationSimEnabled = @"LocationSimEnabled";
 NSString * const kSettingsLocationSimLatitude = @"LocationSimLatitude";
 NSString * const kSettingsLocationSimLongitude = @"LocationSimLongitude";
@@ -3327,29 +3332,60 @@ static void settings_schedule_live_apply_for_key(NSString *key)
     }
 
     if (settings_key_is_picture_overlay(key)) {
-        if ([d boolForKey:kSettingsPictureOverlayEnabled] && g_springboard_rc_ready) {
+        // Apply all enabled overlays from the list
+        NSArray *list = [d arrayForKey:kSettingsPictureOverlayList] ?: @[];
+        BOOL anyEnabled = NO;
+        for (NSDictionary *overlay in list) {
+            if ([overlay[@"enabled"] boolValue] && [overlay[@"path"] length] > 0) {
+                anyEnabled = YES;
+                break;
+            }
+        }
+        // Also check legacy single-overlay key
+        BOOL legacyEnabled = [d boolForKey:kSettingsPictureOverlayEnabled] &&
+                             [[d stringForKey:kSettingsPictureOverlayPath] length] > 0;
+
+        if ((anyEnabled || legacyEnabled) && g_springboard_rc_ready) {
             dispatch_async(dispatch_get_global_queue(0, 0), ^{
                 @synchronized (settings_rc_lock()) {
                     if (settings_cleanup_in_progress() || !g_springboard_rc_ready) return;
-                    const char *path = [[d stringForKey:kSettingsPictureOverlayPath] UTF8String];
-                    bool ok = picture_overlay_apply_in_session(YES, path,
-                        (int)[d integerForKey:kSettingsPictureOverlayOffsetX],
-                        (int)[d integerForKey:kSettingsPictureOverlayOffsetY],
-                        (int)[d integerForKey:kSettingsPictureOverlayScale],
-                        (int)[d integerForKey:kSettingsPictureOverlayAlpha]);
-                    settings_mark_tweak_applied(kSettingsPictureOverlayEnabled,
-                                                ok && [d boolForKey:kSettingsPictureOverlayEnabled]);
-                    printf("[SETTINGS] live Picture Overlay apply result=%d\n", ok);
+
+                    // Apply each enabled overlay from the list
+                    for (NSDictionary *overlay in list) {
+                        if (![overlay[@"enabled"] boolValue]) continue;
+                        NSString *path = overlay[@"path"];
+                        if (path.length == 0) continue;
+
+                        uint64_t oid = [overlay[@"id"] unsignedLongLongValue];
+                        picture_overlay_apply_in_session(oid, YES, [path UTF8String],
+                            [overlay[@"offsetX"] intValue],
+                            [overlay[@"offsetY"] intValue],
+                            [overlay[@"scale"] intValue],
+                            [overlay[@"alpha"] intValue]);
+                    }
+
+                    // Legacy single overlay
+                    if (legacyEnabled) {
+                        const char *path = [[d stringForKey:kSettingsPictureOverlayPath] UTF8String];
+                        picture_overlay_apply_in_session(0, YES, path,
+                            (int)[d integerForKey:kSettingsPictureOverlayOffsetX],
+                            (int)[d integerForKey:kSettingsPictureOverlayOffsetY],
+                            (int)[d integerForKey:kSettingsPictureOverlayScale],
+                            (int)[d integerForKey:kSettingsPictureOverlayAlpha]);
+                    }
+
+                    settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, YES);
+                    printf("[SETTINGS] live Picture Overlay apply (multi)\n");
                 }
                 settings_notify_package_queue_changed_async();
             });
-        } else if (![d boolForKey:kSettingsPictureOverlayEnabled]) {
+        } else {
             settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, NO);
             settings_notify_package_queue_changed_async();
             if (g_springboard_rc_ready) {
                 dispatch_async(dispatch_get_global_queue(0, 0), ^{
                     @synchronized (settings_rc_lock()) {
-                        if (g_springboard_rc_ready) picture_overlay_stop_in_session();
+                        if (g_springboard_rc_ready) picture_overlay_remove_all_in_session();
                     }
                 });
             }
@@ -3430,6 +3466,8 @@ void settings_register_defaults(void)
         kSettingsPictureOverlayOffsetY: @0,
         kSettingsPictureOverlayScale: @100,
         kSettingsPictureOverlayAlpha: @100,
+        kSettingsPictureOverlayList: @[],
+        kSettingsPictureOverlayPendingPick: @0,
 
         kSettingsTypeBannerEnabled: @NO,
 
@@ -3732,13 +3770,37 @@ void settings_run_actions(void)
                     }
 
                     if (runPictureOverlay) {
-                        settings_progress(&step, total, "Applying Picture Overlay");
-                        const char *path = [[d stringForKey:kSettingsPictureOverlayPath] UTF8String];
-                        bool ok = picture_overlay_apply_in_session(YES, path,
-                            (int)[d integerForKey:kSettingsPictureOverlayOffsetX],
-                            (int)[d integerForKey:kSettingsPictureOverlayOffsetY],
-                            (int)[d integerForKey:kSettingsPictureOverlayScale],
-                            (int)[d integerForKey:kSettingsPictureOverlayAlpha]);
+                        settings_progress(&step, total, "Applying Picture Overlay(s)");
+
+                        // Apply each enabled overlay from the list
+                        NSArray *list = [d arrayForKey:kSettingsPictureOverlayList] ?: @[];
+                        for (NSDictionary *overlay in list) {
+                            if (![overlay[@"enabled"] boolValue]) continue;
+                            NSString *path = overlay[@"path"];
+                            if (path.length == 0) continue;
+
+                            uint64_t oid = [overlay[@"id"] unsignedLongLongValue];
+                            picture_overlay_apply_in_session(oid, YES, [path UTF8String],
+                                [overlay[@"offsetX"] intValue],
+                                [overlay[@"offsetY"] intValue],
+                                [overlay[@"scale"] intValue],
+                                [overlay[@"alpha"] intValue]);
+                        }
+
+                        // Legacy single overlay
+                        NSString *legacyPath = [d stringForKey:kSettingsPictureOverlayPath];
+                        if (legacyPath.length > 0 && [d boolForKey:kSettingsPictureOverlayEnabled]) {
+                            picture_overlay_apply_in_session(0, YES, [legacyPath UTF8String],
+                                (int)[d integerForKey:kSettingsPictureOverlayOffsetX],
+                                (int)[d integerForKey:kSettingsPictureOverlayOffsetY],
+                                (int)[d integerForKey:kSettingsPictureOverlayScale],
+                                (int)[d integerForKey:kSettingsPictureOverlayAlpha]);
+                        }
+
+                        settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, YES);
+                        printf("[SETTINGS] Picture Overlay multi-apply done\n");
+                        log_user("%s Picture Overlay(s) applied.\n", ok ? "[OK]" : "[WARN]");
+                        cyanide_upload_log_milestone(@"picture-overlay-applied");
                         settings_mark_tweak_applied(kSettingsPictureOverlayEnabled, ok);
                         printf("[SETTINGS] Picture Overlay result=%d\n", ok);
                         log_user("%s Picture Overlay %s.\n",
@@ -4765,61 +4827,128 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 - (NSArray<NSDictionary *> *)pictureOverlayRows
 {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    BOOL hasImage = [[d stringForKey:kSettingsPictureOverlayPath] length] > 0;
+    NSArray *list = [d arrayForKey:kSettingsPictureOverlayList] ?: @[];
 
-    return @[
-        @{ @"kind": @"info",
-           @"title": @"Selected Image",
-           @"subtitle": hasImage ? @"Image selected — preview below" : @"No image selected" },
+    NSMutableArray *rows = [NSMutableArray array];
 
-        @{ @"kind": @"button",
-           @"title": hasImage ? @"Change Image…" : @"Select Image or GIF…",
-           @"action": @"picture-overlay-select" },
+    // Header
+    [rows addObject:@{
+        @"kind": @"info",
+        @"title": @"Picture Overlays",
+        @"subtitle": [NSString stringWithFormat:@"%lu overlay(s) configured — tap + to add",
+                       (unsigned long)list.count]
+    }];
 
-        @{ @"kind": @"custom",
-           @"kind2": @"picture-preview",
-           @"title": @"Preview" },
+    // Add button for new overlay
+    [rows addObject:@{
+        @"kind": @"button",
+        @"title": @"Add Overlay",
+        @"action": @"picture-overlay-add"
+    }];
 
-        @{ @"kind": @"toggle",
-           @"key": kSettingsPictureOverlayEnabled,
-           @"title": @"Enable Overlay" },
+    // Existing overlays
+    for (NSDictionary *overlay in list) {
+        uint64_t oid = [overlay[@"id"] unsignedLongLongValue];
+        BOOL enabled = [overlay[@"enabled"] boolValue];
+        NSString *path = overlay[@"path"] ?: @"";
+        BOOL hasImage = path.length > 0;
 
-        @{ @"kind": @"slider",
-           @"key": kSettingsPictureOverlayScale,
-           @"title": @"Size",
-           @"min": @10,
-           @"max": @200,
-           @"step": @1,
-           @"unit": @"%",
-           @"default": @100 },
+        // Overlay entry with expand/collapse state
+        [rows addObject:@{
+            @"kind": @"custom",
+            @"kind2": @"picture-overlay-entry",
+            @"title": hasImage ? [path.lastPathComponent stringByDeletingPathExtension] : @"No image",
+            @"subtitle": enabled ? @"Enabled" : @"Disabled",
+            @"enabled": @(enabled),
+            @"overlayId": @(oid)
+        }];
+    }
 
-        @{ @"kind": @"slider",
-           @"key": kSettingsPictureOverlayAlpha,
-           @"title": @"Opacity",
-           @"min": @0,
-           @"max": @100,
-           @"step": @1,
-           @"unit": @"%",
-           @"default": @100 },
+    return rows;
+}
 
-        @{ @"kind": @"slider",
-           @"key": kSettingsPictureOverlayOffsetX,
-           @"title": @"Horizontal Offset",
-           @"min": @(-200),
-           @"max": @200,
-           @"step": @1,
-           @"unit": @"pt",
-           @"default": @0 },
+// Get overlay dict by ID
+- (NSDictionary *)overlayWithId:(uint64_t)overlayId
+{
+    NSArray *list = [[NSUserDefaults standardUserDefaults] arrayForKey:kSettingsPictureOverlayList] ?: @[];
+    for (NSDictionary *overlay in list) {
+        if ([overlay[@"id"] unsignedLongLongValue] == overlayId) return overlay;
+    }
+    return nil;
+}
 
-        @{ @"kind": @"slider",
-           @"key": kSettingsPictureOverlayOffsetY,
-           @"title": @"Vertical Offset",
-           @"min": @(-200),
-           @"max": @200,
-           @"step": @1,
-           @"unit": @"pt",
-           @"default": @0 },
-    ];
+// Update overlay in list
+- (void)updateOverlayWithId:(uint64_t)overlayId updates:(NSDictionary *)updates
+{
+    NSMutableArray *list = [[[NSUserDefaults standardUserDefaults] arrayForKey:kSettingsPictureOverlayList] mutableCopy] ?: [NSMutableArray array];
+
+    NSInteger idx = -1;
+    for (NSInteger i = 0; i < list.count; i++) {
+        if ([list[i][@"id"] unsignedLongLongValue] == overlayId) {
+            idx = i;
+            break;
+        }
+    }
+
+    if (idx >= 0) {
+        NSMutableDictionary *overlay = [list[idx] mutableCopy];
+        [overlay addEntriesFromDictionary:updates];
+        list[idx] = overlay;
+    }
+
+    [[NSUserDefaults standardUserDefaults] setObject:list forKey:kSettingsPictureOverlayList];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+// Add new overlay
+- (void)addNewOverlay
+{
+    uint64_t newId = (uint64_t)([[NSDate date] timeIntervalSince1970] * 1000);
+
+    NSDictionary *newOverlay = @{
+        @"id": @(newId),
+        @"enabled": @NO,
+        @"path": @"",
+        @"offsetX": @0,
+        @"offsetY": @0,
+        @"scale": @100,
+        @"alpha": @100
+    };
+
+    NSMutableArray *list = [[[NSUserDefaults standardUserDefaults] arrayForKey:kSettingsPictureOverlayList] mutableCopy] ?: [NSMutableArray array];
+    [list addObject:newOverlay];
+
+    [[NSUserDefaults standardUserDefaults] setObject:list forKey:kSettingsPictureOverlayList];
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)newId forKey:kSettingsPictureOverlayPendingPick];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    // Open image picker
+    [self presentPictureOverlayPicker];
+
+    // Reload UI
+    [self.tableView reloadData];
+}
+
+// Delete overlay
+- (void)deleteOverlayWithId:(uint64_t)overlayId
+{
+    NSMutableArray *list = [[[NSUserDefaults standardUserDefaults] arrayForKey:kSettingsPictureOverlayList] mutableCopy] ?: [NSMutableArray array];
+
+    NSMutableArray *newList = [NSMutableArray array];
+    for (NSDictionary *overlay in list) {
+        if ([overlay[@"id"] unsignedLongLongValue] != overlayId) {
+            [newList addObject:overlay];
+        }
+    }
+
+    [[NSUserDefaults standardUserDefaults] setObject:newList forKey:kSettingsPictureOverlayList];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    // Stop this overlay in SB
+    picture_overlay_stop_in_session(overlayId);
+
+    // Reload
+    [self.tableView reloadData];
 }
 
 - (NSArray<NSDictionary *> *)themerRows
@@ -7695,7 +7824,36 @@ void cyanide_present_contact(UIViewController *host)
     if (indexPath.section == SectionPictureOverlay) {
         NSDictionary *row = [self rowsForSection:indexPath.section][indexPath.row];
         NSString *action = row[@"action"];
-        if ([action isEqualToString:@"picture-overlay-select"]) {
+
+        // Check if it's a custom overlay entry row
+        if ([row[@"kind2"] isEqualToString:@"picture-overlay-entry"]) {
+            // Toggle enabled state
+            uint64_t oid = [row[@"overlayId"] unsignedLongLongValue];
+            NSDictionary *overlay = [self overlayWithId:oid];
+            if (overlay) {
+                BOOL currentlyEnabled = [overlay[@"enabled"] boolValue];
+                [self updateOverlayWithId:oid updates:@{@"enabled": @(!currentlyEnabled)}];
+
+                if (!currentlyEnabled) {
+                    // Enable: apply to SB
+                    const char *path = [overlay[@"path"] UTF8String];
+                    picture_overlay_apply_in_session(oid, YES, path,
+                        [overlay[@"offsetX"] intValue],
+                        [overlay[@"offsetY"] intValue],
+                        [overlay[@"scale"] intValue],
+                        [overlay[@"alpha"] intValue]);
+                } else {
+                    // Disable: stop in SB
+                    picture_overlay_stop_in_session(oid);
+                }
+                [self.tableView reloadData];
+            }
+            return;
+        }
+
+        if ([action isEqualToString:@"picture-overlay-add"]) {
+            [self addNewOverlay];
+        } else if ([action isEqualToString:@"picture-overlay-select"]) {
             [self presentPictureOverlayPicker];
         }
     }
@@ -7841,6 +7999,7 @@ void cyanide_present_contact(UIViewController *host)
 - (void)handlePictureOverlayPickedFileAtURL:(NSURL *)srcURL
 {
     if (!srcURL) return;
+
     NSString *destDir = [self pictureOverlayImageStoragePath];
     NSString *fileName = [NSString stringWithFormat:@"%@_%@",
                           [[NSProcessInfo processInfo] globallyUniqueString],
@@ -7854,17 +8013,22 @@ void cyanide_present_contact(UIViewController *host)
         return;
     }
 
-    [[NSUserDefaults standardUserDefaults] setObject:destPath forKey:kSettingsPictureOverlayPath];
+    // Update the pending overlay with the selected image
+    uint64_t pendingId = [[NSUserDefaults standardUserDefaults] integerForKey:kSettingsPictureOverlayPendingPick];
+    if (pendingId > 0) {
+        [self updateOverlayWithId:pendingId updates:@{@"path": destPath}];
+        [[NSUserDefaults standardUserDefaults] setInteger:0 forKey:kSettingsPictureOverlayPendingPick];
+        log_user("[PICTURE] Added image to overlay: %s\n", destPath.UTF8String);
+    } else {
+        // Legacy: single overlay mode
+        [[NSUserDefaults standardUserDefaults] setObject:destPath forKey:kSettingsPictureOverlayPath];
+        log_user("[PICTURE] Selected: %s\n", destPath.UTF8String);
+    }
+
     [[NSUserDefaults standardUserDefaults] synchronize];
-    log_user("[PICTURE] Selected: %s\n", destPath.UTF8String);
 
     // Refresh table
     [self.tableView reloadData];
-
-    // If toggle is on, trigger live apply
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:kSettingsPictureOverlayEnabled]) {
-        settings_schedule_live_apply_for_key(kSettingsPictureOverlayEnabled);
-    }
 }
 
 @end
