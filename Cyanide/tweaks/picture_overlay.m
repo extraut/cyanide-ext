@@ -18,10 +18,30 @@
 #import <string.h>
 #import <stdint.h>
 
-// Window level: above icon content (1000-1100 range), below control center (~1200)
-// iOS uses: UIWindowLevelNormal = 0, UIWindowLevelAlert = 1000,
-// UIWindowLevelStatusBar = 1100, UIWindowLevelNotificationAlert = 1500
-static const CGFloat kPictureOverlayWindowLevel = 1050.0;
+// ── Window levels (correct values for iOS 18) ────────────────────────────
+//   UIWindowLevelNormal          =       0.0   (app content / home-screen icons)
+//   UIWindowLevelStatusBar       =    1000.0   (status bar row)
+//   UIWindowLevelAlert           =    2000.0   (UIAlertController)
+//   Control Center / Cover Sheet =  ~4000–8000 (private SB windows)
+//   UIRemoteKeyboardWindow       = 10000001.0  (system keyboard — always on top)
+//
+// kDefaultWindowLevel (1050) sits above icons/status-bar but below alerts and
+// Control Center, which is where a decorative overlay belongs.
+#define kDefaultWindowLevel   1050.0f
+#define kMinWindowLevel          1.0f
+#define kMaxWindowLevel       9999.0f
+
+// Per-overlay window levels (index == overlayId).  0 means "use default".
+static CGFloat gPictureOverlayWindowLevels[32];
+
+static CGFloat picture_overlay_clamped_level(int zIndex)
+{
+    if (zIndex <= 0) return kDefaultWindowLevel;
+    CGFloat lvl = (CGFloat)zIndex;
+    if (lvl < kMinWindowLevel) lvl = kMinWindowLevel;
+    if (lvl > kMaxWindowLevel) lvl = kMaxWindowLevel;
+    return lvl;
+}
 
 // Tag base for overlay views (used to find/stop overlays later)
 static const uint64_t kPictureOverlayTagBase = 0xC0A15000;
@@ -61,8 +81,8 @@ static uint64_t picture_overlay_get_scene(void)
     return scene;
 }
 
-// Create a dedicated overlay window at the right level
-static uint64_t picture_overlay_create_window(uint64_t scene, uint64_t overlayId)
+// Create a dedicated overlay window at the requested level
+static uint64_t picture_overlay_create_window(uint64_t scene, uint64_t overlayId, CGFloat windowLevel)
 {
     uint64_t UIWindow = r_class("UIWindow");
     if (!r_is_objc_ptr(UIWindow)) return 0;
@@ -74,8 +94,8 @@ static uint64_t picture_overlay_create_window(uint64_t scene, uint64_t overlayId
     r_msg2_main(winAlloc, "release", 0, 0, 0, 0);
     if (!r_is_objc_ptr(win)) return 0;
 
-    // Set window level above icon layer, below control center
-    r_msg2_main(win, "setWindowLevel:", *(uint64_t *)&kPictureOverlayWindowLevel, 0, 0, 0);
+    // Set window level (passed by caller; clamped to 1–9999)
+    r_msg2_main(win, "setWindowLevel:", *(uint64_t *)&windowLevel, 0, 0, 0);
 
     // Make it non-interactive (let touches pass through)
     uint64_t NSNumber_class = r_class("NSNumber");
@@ -104,7 +124,10 @@ static uint64_t picture_overlay_get_window(uint64_t overlayId)
     uint64_t scene = picture_overlay_get_scene();
     if (!r_is_objc_ptr(scene)) return 0;
 
-    uint64_t win = picture_overlay_create_window(scene, overlayId);
+    CGFloat level = gPictureOverlayWindowLevels[overlayId];
+    if (level < kMinWindowLevel) level = kDefaultWindowLevel;
+
+    uint64_t win = picture_overlay_create_window(scene, overlayId, level);
     if (r_is_objc_ptr(win)) {
         gPictureOverlayWindows[overlayId] = win;
     }
@@ -233,7 +256,8 @@ static BOOL picture_overlay_is_gif(const char *imagePath)
 
 bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const char *imagePath,
                                       int offsetX, int offsetY,
-                                      int scalePct, int alphaPct)
+                                      int scalePct, int alphaPct,
+                                      int zIndex)
 {
     if (!enabled) {
         return picture_overlay_stop_in_session(overlayId);
@@ -242,6 +266,12 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
     if (!imagePath || !*imagePath) {
         printf("[PICTURE] no image path for id=%llu\n", overlayId);
         return false;
+    }
+
+    // Store and apply window level (1–9999 → UIWindowLevel float)
+    CGFloat windowLevel = picture_overlay_clamped_level(zIndex);
+    if (overlayId < 32) {
+        gPictureOverlayWindowLevels[overlayId] = windowLevel;
     }
 
     // Get or create overlay window
@@ -263,6 +293,9 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
     uint64_t existingView = r_msg2_main(window, "viewWithTag:", tag, 0, 0, 0);
 
     if (r_is_objc_ptr(existingView)) {
+        // Refresh window level in case the user changed it
+        r_msg2_main(window, "setWindowLevel:", *(uint64_t *)&windowLevel, 0, 0, 0);
+
         // Update existing view
         r_msg2_main(existingView, "setImage:", image, 0, 0, 0);
         r_dlsym_call(5, "CFRelease", image, 0, 0, 0, 0, 0, 0, 0);
@@ -338,8 +371,8 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
     r_msg2_main(window, "addSubview:", imageView, 0, 0, 0);
     r_msg2_main(window, "makeKeyAndVisible:", 0, 0, 0, 0);
 
-    printf("[PICTURE] created overlay id=%llu tag=0x%llx at (%.0f, %.0f) size (%.0f, %.0f)\n",
-           overlayId, tag, posX, posY, scaledW, scaledH);
+    printf("[PICTURE] created overlay id=%llu tag=0x%llx level=%.0f at (%.0f, %.0f) size (%.0f, %.0f)\n",
+           overlayId, tag, windowLevel, posX, posY, scaledW, scaledH);
 
     return true;
 }
@@ -405,5 +438,6 @@ void picture_overlay_forget_remote_state(void)
     gPictureOverlayScene = 0;
     for (int i = 0; i < 32; i++) {
         gPictureOverlayWindows[i] = 0;
+        gPictureOverlayWindowLevels[i] = 0;   // will re-apply from zIndex on next call
     }
 }
