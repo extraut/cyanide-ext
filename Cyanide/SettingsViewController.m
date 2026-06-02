@@ -6786,6 +6786,10 @@ void cyanide_present_contact(UIViewController *host)
         return [self buildPictureOverlayPreviewCell:tableView overlayId:oid];
     }
 
+    if ([kind isEqualToString:@"custom"] && [row[@"kind2"] isEqualToString:@"picture-overlay-entry"]) {
+        return [self buildPictureOverlayEntryCell:row tableView:tableView];
+    }
+
     if ([kind isEqualToString:@"info"]) {
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"info"];
         if (!cell) {
@@ -7956,31 +7960,10 @@ void cyanide_present_contact(UIViewController *host)
         NSString *action = row[@"action"];
         NSNumber *oidNumber = row[@"overlayId"];
 
-        // Check if it's a custom overlay entry row
+        // Picture overlay entry uses a real UISwitch (handled in buildPictureOverlayEntryCell)
+        // so we don't toggle on tap — only on switch change.
         if ([row[@"kind2"] isEqualToString:@"picture-overlay-entry"]) {
-            uint64_t oid = [oidNumber unsignedLongLongValue];
-            NSDictionary *overlay = [self overlayWithId:oid];
-            if (overlay) {
-                BOOL currentlyEnabled = [overlay[@"enabled"] boolValue];
-                [self updateOverlayWithId:oid updates:@{@"enabled": @(!currentlyEnabled)}];
-
-                if (!currentlyEnabled) {
-                    // Enable: apply to SB with current per-overlay settings
-                    NSString *path = overlay[@"path"];
-                    if (path.length > 0) {
-                        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-                        picture_overlay_apply_in_session(oid, YES, [path UTF8String],
-                            (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
-                            (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
-                            (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
-                            (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]]);
-                    }
-                } else {
-                    picture_overlay_stop_in_session(oid);
-                }
-                [self.tableView reloadData];
-            }
-            return;
+            return; // Tap does nothing; switch handles state
         }
 
         if ([action isEqualToString:@"picture-overlay-add"]) {
@@ -7999,6 +7982,79 @@ void cyanide_present_contact(UIViewController *host)
 }
 
 #pragma mark - Picture Overlay UI
+
+- (UITableViewCell *)buildPictureOverlayEntryCell:(NSDictionary *)row tableView:(UITableView *)tableView
+{
+    static NSString *const reuseId = @"picture-overlay-entry";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseId];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseId];
+    }
+    for (UIView *v in [cell.contentView.subviews copy]) [v removeFromSuperview];
+    cell.accessoryView = nil;
+
+    uint64_t oid = [row[@"overlayId"] unsignedLongLongValue];
+    BOOL enabled = [row[@"enabled"] boolValue];
+
+    cell.textLabel.text = row[@"title"];
+    cell.textLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
+    cell.textLabel.textColor = enabled ? UIColor.labelColor : UIColor.tertiaryLabelColor;
+
+    cell.detailTextLabel.text = row[@"subtitle"];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
+    cell.detailTextLabel.textColor = enabled ? UIColor.systemBlueColor : UIColor.tertiaryLabelColor;
+
+    // Real UISwitch
+    UISwitch *sw = [[UISwitch alloc] init];
+    sw.on = enabled;
+    sw.tag = (NSInteger)oid;
+    [sw addTarget:self action:@selector(pictureOverlayEntrySwitchChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = sw;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    return cell;
+}
+
+- (void)pictureOverlayEntrySwitchChanged:(UISwitch *)sender
+{
+    uint64_t oid = (uint64_t)sender.tag;
+    BOOL newState = sender.isOn;
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+
+    // 1. Update dict in list
+    [self updateOverlayWithId:oid updates:@{@"enabled": @(newState)}];
+    [d synchronize];
+
+    NSDictionary *overlay = [self overlayWithId:oid];
+    NSString *path = overlay[@"path"] ?: @"";
+
+    if (newState) {
+        // Enable
+        if (path.length > 0 && g_springboard_rc_ready) {
+            dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                @synchronized (settings_rc_lock()) {
+                    picture_overlay_apply_in_session(oid, YES, [path UTF8String],
+                        (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
+                        (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
+                        (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
+                        (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]]);
+                }
+            });
+        }
+    } else {
+        // Disable — explicitly remove from SpringBoard
+        if (g_springboard_rc_ready) {
+            dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                @synchronized (settings_rc_lock()) {
+                    picture_overlay_stop_in_session(oid);
+                }
+            });
+        }
+    }
+
+    // Reload UI to show/hide per-overlay sliders
+    [self.tableView reloadData];
+}
 
 - (UITableViewCell *)buildPictureOverlayPreviewCell:(UITableView *)tableView overlayId:(uint64_t)overlayId
 {
