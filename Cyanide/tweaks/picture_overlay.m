@@ -58,7 +58,9 @@ static uint64_t picture_overlay_tag_for_id(uint64_t overlayId)
     return kPictureOverlayTagBase | (overlayId & kPictureOverlayTagMask);
 }
 
-// Get the SpringBoard scene to create our overlay window
+// FIX #1: Get the SpringBoard scene using connectedScenes (iOS 13+).
+// The old approach used keyWindow which is unreliable in SpringBoard context
+// and often returns nil, causing result=0 / WARN refresh on every run.
 static uint64_t picture_overlay_get_scene(void)
 {
     if (gPictureOverlayScene && r_is_objc_ptr(gPictureOverlayScene)) {
@@ -71,14 +73,59 @@ static uint64_t picture_overlay_get_scene(void)
     uint64_t app = r_msg2_main(UIApplication, "sharedApplication", 0, 0, 0, 0);
     if (!r_is_objc_ptr(app)) return 0;
 
-    uint64_t keyWin = r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(keyWin)) return 0;
-
-    uint64_t scene = r_msg2_main(keyWin, "windowScene", 0, 0, 0, 0);
-    if (r_is_objc_ptr(scene)) {
-        gPictureOverlayScene = scene;
+    // Primary path: iterate connectedScenes (iOS 13+, preferred in SpringBoard)
+    uint64_t scenes = r_msg2_main(app, "connectedScenes", 0, 0, 0, 0);
+    if (r_is_objc_ptr(scenes)) {
+        uint64_t enumerator = r_msg2_main(scenes, "objectEnumerator", 0, 0, 0, 0);
+        if (r_is_objc_ptr(enumerator)) {
+            uint64_t UIWindowScene_cls = r_class("UIWindowScene");
+            uint64_t scene = 0;
+            while ((scene = r_msg2_main(enumerator, "nextObject", 0, 0, 0, 0)) &&
+                   r_is_objc_ptr(scene)) {
+                if (r_is_objc_ptr(UIWindowScene_cls)) {
+                    uint64_t isKind = r_msg2_main(scene, "isKindOfClass:", UIWindowScene_cls, 0, 0, 0);
+                    if (isKind) {
+                        gPictureOverlayScene = scene;
+                        printf("[PICTURE] got scene via connectedScenes: 0x%llx\n", scene);
+                        return scene;
+                    }
+                } else {
+                    // No UIWindowScene class available — take first scene we get
+                    gPictureOverlayScene = scene;
+                    printf("[PICTURE] got scene (no class check) via connectedScenes: 0x%llx\n", scene);
+                    return scene;
+                }
+            }
+        }
     }
-    return scene;
+
+    // Fallback 1: keyWindow -> windowScene
+    uint64_t keyWin = r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
+    if (r_is_objc_ptr(keyWin)) {
+        uint64_t scene = r_msg2_main(keyWin, "windowScene", 0, 0, 0, 0);
+        if (r_is_objc_ptr(scene)) {
+            gPictureOverlayScene = scene;
+            printf("[PICTURE] got scene via keyWindow fallback: 0x%llx\n", scene);
+            return scene;
+        }
+    }
+
+    // Fallback 2: windows array -> first window -> windowScene
+    uint64_t windows = r_msg2_main(app, "windows", 0, 0, 0, 0);
+    if (r_is_objc_ptr(windows)) {
+        uint64_t firstWin = r_msg2_main(windows, "firstObject", 0, 0, 0, 0);
+        if (r_is_objc_ptr(firstWin)) {
+            uint64_t scene = r_msg2_main(firstWin, "windowScene", 0, 0, 0, 0);
+            if (r_is_objc_ptr(scene)) {
+                gPictureOverlayScene = scene;
+                printf("[PICTURE] got scene via windows.firstObject: 0x%llx\n", scene);
+                return scene;
+            }
+        }
+    }
+
+    printf("[PICTURE] WARNING: could not get UIWindowScene — overlay will not appear\n");
+    return 0;
 }
 
 // Create a dedicated overlay window at the requested level
@@ -97,7 +144,8 @@ static uint64_t picture_overlay_create_window(uint64_t scene, uint64_t overlayId
     }
 
     uint64_t win = r_msg2_main(winAlloc, "initWithWindowScene:", scene, 0, 0, 0);
-    r_msg2_main(winAlloc, "release", 0, 0, 0, 0);
+    // FIX #2: Do NOT release winAlloc after -init. The init family consumes
+    // the alloc retain — calling release here causes an over-release / crash.
     if (!r_is_objc_ptr(win)) {
         printf("[PICTURE] initWithWindowScene: failed\n");
         return 0;
@@ -124,7 +172,7 @@ static uint64_t picture_overlay_create_window(uint64_t scene, uint64_t overlayId
         uint64_t vcAlloc = r_msg2_main(UIViewController, "alloc", 0, 0, 0, 0);
         if (r_is_objc_ptr(vcAlloc)) {
             uint64_t vc = r_msg2_main(vcAlloc, "init", 0, 0, 0, 0);
-            r_msg2_main(vcAlloc, "release", 0, 0, 0, 0);
+            // FIX #2 (same pattern): no release on vcAlloc after init
             if (r_is_objc_ptr(vc)) {
                 r_msg2_main(win, "setRootViewController:", vc, 0, 0, 0);
                 r_msg2_main(vc, "release", 0, 0, 0, 0);
@@ -199,8 +247,7 @@ static uint64_t picture_overlay_load_gif(const char *imagePath)
     uint64_t NSMutableArray_class = r_class("NSMutableArray");
     uint64_t images = r_msg2_main(NSMutableArray_class, "alloc", 0, 0, 0, 0);
     uint64_t imagesArr = r_msg2_main(images, "init", 0, 0, 0, 0);
-    r_msg2_main(images, "release", 0, 0, 0, 0);
-
+    // FIX #2 (same pattern): no release on images after init
     if (!r_is_objc_ptr(imagesArr)) {
         CFRelease(source);
         return 0;
@@ -237,6 +284,7 @@ static uint64_t picture_overlay_load_image(const char *imagePath)
     if (!imagePath || !*imagePath) return 0;
 
     NSData *imageData = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:imagePath]];
+
     if (!imageData || imageData.length == 0) return 0;
 
     uint64_t NSData_class = r_class("NSData");
@@ -250,7 +298,7 @@ static uint64_t picture_overlay_load_image(const char *imagePath)
 
     uint64_t NSDataAlloc = r_msg2_main(NSData_class, "alloc", 0, 0, 0, 0);
     uint64_t remoteData = r_msg2_main(NSDataAlloc, "initWithBytes:length:", remoteDataPtr, dataLen, 0, 0);
-    r_msg2_main(NSDataAlloc, "release", 0, 0, 0, 0);
+    // FIX #2 (same pattern): no release on NSDataAlloc after init
 
     if (!r_is_objc_ptr(remoteData)) {
         r_dlsym_call(5, "free", remoteDataPtr, 0, 0, 0, 0, 0, 0, 0);
@@ -263,7 +311,6 @@ static uint64_t picture_overlay_load_image(const char *imagePath)
         return 0;
     }
 
-    uint64_t imageWithDataSel = r_sel("imageWithData:");
     uint64_t remoteImage = r_msg2_main(UIImage_class, "imageWithData:", remoteData, 0, 0, 0);
     r_dlsym_call(5, "CFRelease", remoteData, 0, 0, 0, 0, 0, 0, 0);
 
@@ -304,7 +351,8 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
     // Get or create overlay window
     uint64_t window = picture_overlay_get_window(overlayId);
     if (!r_is_objc_ptr(window)) {
-        printf("[PICTURE] could not get overlay window for id=%llu\n", overlayId);
+        printf("[PICTURE] FAIL: could not get overlay window for id=%llu (scene=0x%llx)\n",
+               overlayId, gPictureOverlayScene);
         return false;
     }
 
@@ -315,9 +363,19 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
         return false;
     }
 
-    // Find existing image view in this window
+    // FIX #3: resolve rootViewController.view as the add/search target.
+    // UIWindow itself is not a reliable viewWithTag: search root in SpringBoard;
+    // always use rootVC.view when available.
+    uint64_t rootVC   = r_msg2_main(window, "rootViewController", 0, 0, 0, 0);
+    uint64_t rootView = r_is_objc_ptr(rootVC)
+                        ? r_msg2_main(rootVC, "view", 0, 0, 0, 0)
+                        : 0;
+    uint64_t addTarget    = r_is_objc_ptr(rootView) ? rootView : window;
+    uint64_t searchTarget = addTarget;
+
+    // Find existing image view
     uint64_t tag = picture_overlay_tag_for_id(overlayId);
-    uint64_t existingView = r_msg2_main(window, "viewWithTag:", tag, 0, 0, 0);
+    uint64_t existingView = r_msg2_main(searchTarget, "viewWithTag:", tag, 0, 0, 0);
 
     if (r_is_objc_ptr(existingView)) {
         // Refresh window level in case the user changed it
@@ -362,7 +420,7 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
     uint64_t ivAlloc = r_msg2_main(UIImageView_class, "alloc", 0, 0, 0, 0);
     uint64_t imageView = r_msg2_main(ivAlloc, "initWithImage:", image, 0, 0, 0);
     r_dlsym_call(5, "CFRelease", image, 0, 0, 0, 0, 0, 0, 0);
-    r_msg2_main(ivAlloc, "release", 0, 0, 0, 0);
+    // FIX #2 (same pattern): no release on ivAlloc after init
 
     if (!r_is_objc_ptr(imageView)) {
         printf("[PICTURE] failed to create UIImageView\n");
@@ -394,8 +452,8 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
     r_msg2_main_raw(imageView, "setFrame:", &frame, sizeof(frame),
                     NULL, 0, NULL, 0, NULL, 0);
 
-    // Add to window
-    r_msg2_main(window, "addSubview:", imageView, 0, 0, 0);
+    // FIX #3: add to rootVC.view (or window as fallback) so viewWithTag: works next time
+    r_msg2_main(addTarget, "addSubview:", imageView, 0, 0, 0);
     r_msg2_main(window, "setHidden:", 0, 0, 0, 0);
 
     printf("[PICTURE] created overlay id=%llu tag=0x%llx level=%.0f at (%.0f, %.0f) size (%.0f, %.0f)\n",
@@ -417,12 +475,21 @@ bool picture_overlay_stop_in_session(uint64_t overlayId)
         if (!r_is_objc_ptr(window)) return true;  // Already gone
     }
 
+    // FIX #3: search on rootVC.view, mirroring apply logic
+    uint64_t rootVC   = r_msg2_main(window, "rootViewController", 0, 0, 0, 0);
+    uint64_t rootView = r_is_objc_ptr(rootVC)
+                        ? r_msg2_main(rootVC, "view", 0, 0, 0, 0)
+                        : 0;
+    uint64_t searchTarget = r_is_objc_ptr(rootView) ? rootView : window;
+
     uint64_t tag = picture_overlay_tag_for_id(overlayId);
-    uint64_t view = r_msg2_main(window, "viewWithTag:", tag, 0, 0, 0);
+    uint64_t view = r_msg2_main(searchTarget, "viewWithTag:", tag, 0, 0, 0);
 
     if (r_is_objc_ptr(view)) {
         r_msg2_main(view, "removeFromSuperview", 0, 0, 0, 0);
-        r_msg2_main(view, "release", 0, 0, 0, 0);
+        // FIX #4: do NOT call release after removeFromSuperview.
+        // removeFromSuperview already releases the superview's retain;
+        // an extra release here causes an over-release / crash.
         printf("[PICTURE] removed overlay id=%llu\n", overlayId);
     }
 
