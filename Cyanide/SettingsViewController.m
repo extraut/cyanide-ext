@@ -3362,7 +3362,7 @@ static void settings_schedule_live_apply_for_key(NSString *key)
                             [overlay[@"offsetY"] intValue],
                             [overlay[@"scale"] intValue],
                             [overlay[@"alpha"] intValue],
-                            1050);
+                            (int)[d integerForKey:[self pictureOverlayZKey:oid]] ?: 1050);
                     }
 
                     // Legacy single overlay
@@ -3784,12 +3784,14 @@ void settings_run_actions(void)
                             if (path.length == 0) continue;
 
                             uint64_t oid = [overlay[@"id"] unsignedLongLongValue];
+                            int zIndex = (int)[d integerForKey:[self pictureOverlayZKey:oid]];
+                            if (zIndex < 1) zIndex = 1050;
                             ok &= picture_overlay_apply_in_session(oid, YES, [path UTF8String],
                                 [overlay[@"offsetX"] intValue],
                                 [overlay[@"offsetY"] intValue],
                                 [overlay[@"scale"] intValue],
                                 [overlay[@"alpha"] intValue],
-                                1050);
+                                zIndex);
                         }
 
                         // Legacy single overlay
@@ -4899,6 +4901,17 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 
             [rows addObject:@{
                 @"kind": @"slider",
+                @"key": [self pictureOverlayZKey:oid],
+                @"title": @"Z-Index (Window Level)",
+                @"min": @1,
+                @"max": @9999,
+                @"step": @50,
+                @"unit": @"",
+                @"default": @(1050)
+            }];
+
+            [rows addObject:@{
+                @"kind": @"slider",
                 @"key": [self pictureOverlayOffsetXKey:oid],
                 @"title": @"Horizontal Offset",
                 @"min": @(-200),
@@ -4959,6 +4972,17 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 - (NSString *)pictureOverlayOffsetYKey:(uint64_t)oid
 {
     return [NSString stringWithFormat:@"PO_OffsetY_%llu", oid];
+}
+
+- (NSString *)pictureOverlayZKey:(uint64_t)oid
+{
+    return [NSString stringWithFormat:@"PO_Z_%llu", oid];
+}
+
+// Default Z index when not set
+- (NSInteger)pictureOverlayDefaultZ
+{
+    return 1050;
 }
 
 // Get overlay dict by ID
@@ -7071,7 +7095,8 @@ void cyanide_present_contact(UIViewController *host)
     if (row) {
         NSString *key = row[@"key"];
         if ([key hasPrefix:@"PO_Scale_"] || [key hasPrefix:@"PO_Alpha_"] ||
-            [key hasPrefix:@"PO_OffsetX_"] || [key hasPrefix:@"PO_OffsetY_"]) {
+            [key hasPrefix:@"PO_OffsetX_"] || [key hasPrefix:@"PO_OffsetY_"] ||
+            [key hasPrefix:@"PO_Z_"]) {
             // Extract overlay ID from key
             NSArray *parts = [key componentsSeparatedByString:@"_"];
             if (parts.count >= 3) {
@@ -7086,12 +7111,14 @@ void cyanide_present_contact(UIViewController *host)
                         dispatch_async(dispatch_get_global_queue(0, 0), ^{
                             @synchronized (settings_rc_lock()) {
                                 if (g_springboard_rc_ready) {
+                                    int zIndex = (int)[d integerForKey:[self pictureOverlayZKey:oid]];
+                                    if (zIndex < 1) zIndex = 1050;
                                     picture_overlay_apply_in_session(oid, YES, [path UTF8String],
                                         (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
                                         (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
                                         (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
                                         (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]],
-                                        1050);
+                                        zIndex);
                                 }
                             }
                         });
@@ -8038,12 +8065,14 @@ void cyanide_present_contact(UIViewController *host)
         if (path.length > 0 && g_springboard_rc_ready) {
             dispatch_async(dispatch_get_global_queue(0, 0), ^{
                 @synchronized (settings_rc_lock()) {
+                    int zIndex = (int)[d integerForKey:[self pictureOverlayZKey:oid]];
+                    if (zIndex < 1) zIndex = 1050;
                     picture_overlay_apply_in_session(oid, YES, [path UTF8String],
                         (int)[d integerForKey:[self pictureOverlayOffsetXKey:oid]],
                         (int)[d integerForKey:[self pictureOverlayOffsetYKey:oid]],
                         (int)[d integerForKey:[self pictureOverlayScaleKey:oid]],
                         (int)[d integerForKey:[self pictureOverlayAlphaKey:oid]],
-                        1050);
+                        zIndex);
                 }
             });
         }
@@ -8209,11 +8238,13 @@ void cyanide_present_contact(UIViewController *host)
             if (path.length > 0) {
                 dispatch_async(dispatch_get_global_queue(0, 0), ^{
                     @synchronized (settings_rc_lock()) {
+                        int zIndex = (int)[d integerForKey:[self pictureOverlayZKey:overlayId]];
+                        if (zIndex < 1) zIndex = 1050;
                         picture_overlay_apply_in_session(overlayId, YES, [path UTF8String],
                             (int)newOffsetX, (int)newOffsetY,
                             (int)[d integerForKey:[self pictureOverlayScaleKey:overlayId]],
                             (int)[d integerForKey:[self pictureOverlayAlphaKey:overlayId]],
-                            1050);
+                            zIndex);
                     }
                 });
             }
