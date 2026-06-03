@@ -52,7 +52,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *statBar = [[Package alloc] initWithIdentifier:@"com.darksword.statbar"
                                            name:@"StatBar"
                                shortDescription:@"Battery temperature + free RAM overlay"
-                                longDescription:@"Installs an overlay window in SpringBoard that shows live battery temperature and free RAM next to the system status bar. Refreshes about once per second while the RemoteCall session is alive.\n\nConfigure Celsius/Fahrenheit and network speed visibility in the Settings tab."
+                                longDescription:@"Installs an overlay window in SpringBoard that shows live battery temperature and free RAM next to the system status bar. Refreshes about once per second while the RemoteCall session is alive.\nConfigure Celsius/Fahrenheit and network speed visibility in the Settings tab."
                                         version:version
                                          author:@"zeroxjf"
                                        category:@"Status Bar"
@@ -65,7 +65,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *signal = [[Package alloc] initWithIdentifier:@"com.darksword.rssidisplay"
                                            name:@"Signal Readouts"
                                shortDescription:@"RSRP dBm on cellular, bar count on WiFi"
-                                longDescription:@"Replaces the signal-strength glyphs in the status bar with live numeric readouts: RSRP in dBm for cellular, and the active bar count for WiFi. Updates roughly once per second.\n\nToggle WiFi-only or cellular-only in the Settings tab."
+                                longDescription:@"Replaces the signal-strength glyphs in the status bar with live numeric readouts: RSRP in dBm for cellular, and the active bar count for WiFi. Updates roughly once per second.\nToggle WiFi-only or cellular-only in the Settings tab."
                                         version:version
                                          author:@"zeroxjf"
                                        category:@"In Development"
@@ -81,7 +81,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *sbc = [[Package alloc] initWithIdentifier:@"com.darksword.sbcustomizer"
                                            name:@"SBCustomizer"
                                shortDescription:@"Custom dock count and home screen grid"
-                                longDescription:@"Customizes the dock icon count and the home screen icon grid (columns and rows). Optionally hides icon labels.\n\nAdjust the per-axis counts and the label-hide switch in the Settings tab."
+                                longDescription:@"Customizes the dock icon count and the home screen icon grid (columns and rows). Optionally hides icon labels.\nAdjust the per-axis counts and the label-hide switch in the Settings tab."
                                         version:version
                                          author:@"zeroxjf"
                                        category:@"Home Screen Layout"
@@ -94,7 +94,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *powercuff = [[Package alloc] initWithIdentifier:@"com.darksword.powercuff"
                                            name:@"Powercuff"
                                shortDescription:@"Underclock the CPU/GPU thermal pressure"
-                                longDescription:@"Drives thermalmonitord with synthetic thermal pressure to underclock the CPU and GPU. Useful for cooling-sensitive workloads or extending runtime under load. Effects persist until reboot.\n\nNominal is the daily-use default. Light, Moderate, and Heavy intentionally underclock the CPU more, so lag and slower app launches mean it is working as intended. Those levels can be too slow for comfortable day-to-day use, especially on older devices.\n\nPick a level in the Settings tab."
+                                longDescription:@"Drives thermalmonitord with synthetic thermal pressure to underclock the CPU and GPU. Useful for cooling-sensitive workloads or extending runtime under load. Effects persist until reboot.\nNominal is the daily-use default. Light, Moderate, and Heavy intentionally underclock the CPU more, so lag and slower app launches mean it is working as intended. Those levels can be too slow for comfortable day-to-day use, especially on older devices.\nPick a level in the Settings tab."
                                         version:version
                                          author:@"rpetrich"
                                        category:@"Performance"
@@ -107,7 +107,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *axon = [[Package alloc] initWithIdentifier:@"com.darksword.axonlite"
                                            name:@"Axon Lite"
                                shortDescription:@"Group Notification Center requests by app"
-                                longDescription:@"Groups visible Notification Center requests by app in a SpringBoard overlay and filters duplicates while Cyanide keeps the RemoteCall session alive.\n\nNo extra configuration."
+                                longDescription:@"Groups visible Notification Center requests by app in a SpringBoard overlay and filters duplicates while Cyanide keeps the RemoteCall session alive.\nNo extra configuration."
                                         version:version
                                          author:@"zeroxjf"
                                        category:@"Beta"
@@ -120,7 +120,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *typeBanner = [[Package alloc] initWithIdentifier:@"com.darksword.typebanner"
                                            name:@"TypeBanner"
                                shortDescription:@"iMessage typing banner under the Dynamic Island"
-                                longDescription:@"Port of TypeMillennium. Shows a pill banner just below the Dynamic Island whenever the active Messages conversation list shows a typing indicator.\n\nv1 limitation: detection runs against the Messages app's own view hierarchy via RemoteCall, so it only fires while Messages.app is running.\n\nNo extra configuration."
+                                longDescription:@"Port of TypeMillennium. Shows a pill banner just below the Dynamic Island whenever the active Messages conversation list shows a typing indicator.\nv1 limitation: detection runs against the Messages app's own view hierarchy via RemoteCall, so it only fires while Messages.app is running.\nNo extra configuration."
                                         version:version
                                          author:@"zeroxjf"
                                        category:@"In Development"
@@ -136,15 +136,15 @@ static const NSInteger kSecAniTime          = 20;
                                            name:@"Dynamic Stage Lite"
                                shortDescription:@"Two floating app windows, iPad-style"
                                 longDescription:
-            @"Run two apps as floating, resizable windows on top of SpringBoard.\n\n"
-            @"Based on Dynamic Stage by tomt000 — the original Stage Manager-for-iPhone tweak. Dynamic Stage Lite is an independent, RemoteCall-only re-implementation of the split-view + scene-hosting design; no original tweak code or assets are reused. Go check out tomt000's full version on Havoc.\n\n"
+            @"Run two apps as floating, resizable windows on top of SpringBoard.\n"
+            @"Based on Dynamic Stage by tomt000 — the original Stage Manager-for-iPhone tweak. Dynamic Stage Lite is an independent, RemoteCall-only re-implementation of the split-view + scene-hosting design; no original tweak code or assets are reused. Go check out tomt000's full version on Havoc.\n"
             @"How to use:\n"
             @"• Tap the dot in the bottom-right corner of the screen to open the picker.\n"
             @"• Tap two apps to launch them side-by-side.\n"
             @"• Drag the top bar to move; drag any corner to resize.\n"
             @"• X in the top-left of a window closes it.\n"
-            @"• Gear in the picker tray jumps back to Cyanide settings.\n\n"
-            @"First Run is slow. The picker has to enumerate every installed app over RemoteCall and build a tile for each one — expect 1-2 minutes on a fresh install. Re-Runs reuse the cache and are fast.\n\n"
+            @"• Gear in the picker tray jumps back to Cyanide settings.\n"
+            @"First Run is slow. The picker has to enumerate every installed app over RemoteCall and build a tile for each one — expect 1-2 minutes on a fresh install. Re-Runs reuse the cache and are fast.\n"
             @"Rough edges:\n"
             @"• Touch routing into hosted apps isn't wired — windows are for viewing/switching, not scrolling or typing.\n"
             @"• Auto-close on full-screen launch is not yet hooked up; close manually with the X.\n"
@@ -162,7 +162,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *locationSim = [[Package alloc] initWithIdentifier:@"com.darksword.locationsim"
                                            name:@"Location Simulator"
                                shortDescription:@"CoreLocation static point simulation"
-                                longDescription:@"Spoofs the device's GPS location via Apple's CLSimulationManager. Requires Apple Maps installed and set up — Maps is the RemoteCall host process that drives the simulation.\n\nThis is a manual tool, not an installable package. Open Controls, choose a target, then use Simulate Current Target or Restore Real Location. Each run opens the activity log and marks completion when the request returns. Reset may take a few minutes and may require a reboot plus extra wait time.\n\nSettings exposes the current target plus altitude and accuracy. v1 is static-point only; route playback and alternate daemon hosts are next.\n\nNot all apps respect the simulated location. Apps that use their own location validation or additional signals may ignore it.\n\nCredits: kolbicz provided the GPS spoofer RemoteCall/CLSimulationManager prototype this is based on. ezzuldinSt's LSpoof provided the app-side CLLocationManager spoofing, picker, bookmarks, and route-simulation reference.\n\nSystem-behavior warning: simulated locations can affect more than maps. Features tied to location, including time zone, date/time behavior, weather, automation, reminders, and service checks, may behave unexpectedly. Only use this if you know what you're doing.\n\nLegal and service-use note: simulated locations may violate app terms, platform rules, game rules, ride-share or delivery policies, or local law depending on how they are used. Use only where you have permission. You are responsible for your use and apply or restore this tweak at your own risk."
+                                longDescription:@"Spoofs the device's GPS location via Apple's CLSimulationManager. Requires Apple Maps installed and set up — Maps is the RemoteCall host process that drives the simulation.\nThis is a manual tool, not an installable package. Open Controls, choose a target, then use Simulate Current Target or Restore Real Location. Each run opens the activity log and marks completion when the request returns. Reset may take a few minutes and may require a reboot plus extra wait time.\nSettings exposes the current target plus altitude and accuracy. v1 is static-point only; route playback and alternate daemon hosts are next.\nNot all apps respect the simulated location. Apps that use their own location validation or additional signals may ignore it.\nCredits: kolbicz provided the GPS spoofer RemoteCall/CLSimulationManager prototype this is based on. ezzuldinSt's LSpoof provided the app-side CLLocationManager spoofing, picker, bookmarks, and route-simulation reference.\nSystem-behavior warning: simulated locations can affect more than maps. Features tied to location, including time zone, date/time behavior, weather, automation, reminders, and service checks, may behave unexpectedly. Only use this if you know what you're doing.\nLegal and service-use note: simulated locations may violate app terms, platform rules, game rules, ride-share or delivery policies, or local law depending on how they are used. Use only where you have permission. You are responsible for your use and apply or restore this tweak at your own risk."
                                         version:version
                                          author:@"zeroxjf, kolbicz, ezzuldinSt"
                                        category:@"Experimental"
@@ -177,7 +177,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *themer = [[Package alloc] initWithIdentifier:@"com.darksword.themer"
                                            name:@"Cyanide Themer"
                                shortDescription:@"Per-bundle icon theme engine"
-                                longDescription:@"Replaces stock app icons by walking SpringBoard's SBIconView hierarchy and swapping each icon's image with a PNG matched on the app's bundle identifier.\n\nPick a theme in Settings > Cyanide Themer. Cyanide ships with iOS 6 Theme, using icons from zagnut531/iOS-6-Icons: https://github.com/zagnut531/iOS-6-Icons. You can also import a custom folder of <bundleID>.png files or a binary plist mapping bundle IDs to PNG data.\n\nApplied at Run; not persisted across respring. The current build also seeds SpringBoard's icon cache and rounds imported PNGs before upload so icons survive common home-screen relayouts more cleanly."
+                                longDescription:@"Replaces stock app icons by walking SpringBoard's SBIconView hierarchy and swapping each icon's image with a PNG matched on the app's bundle identifier.\nPick a theme in Settings > Cyanide Themer. Cyanide ships with iOS 6 Theme, using icons from zagnut531/iOS-6-Icons: https://github.com/zagnut531/iOS-6-Icons. You can also import a custom folder of <bundleID>.png files or a binary plist mapping bundle IDs to PNG data.\nApplied at Run; not persisted across respring. The current build also seeds SpringBoard's icon cache and rounds imported PNGs before upload so icons survive common home-screen relayouts more cleanly."
                                         version:version
                                          author:@"zeroxjf"
                                        category:@"Beta"
@@ -192,7 +192,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *layoutExtras = [[Package alloc] initWithIdentifier:@"com.darksword.layoutextras"
                                            name:@"Home Layout Extras"
                                shortDescription:@"Extra home/dock padding and per-icon scaling"
-                                longDescription:@"Adds extra padding around the home grid and the dock, and scales icons up or down. Stacks on top of SBCustomizer.\n\nDial in left/right/top/bottom padding for the home screen, horizontal padding for the dock, and home/dock icon scale in the Settings tab. Defaults match stock (zero padding, 100% scale).\n\nApplied at Run; not persisted across respring.\n\niOS 18: mutates the SBIconController layout configuration directly (upstream kolbicz path).\niOS 26: walks the live SBIconListView/SBIconView hierarchy and adjusts frames + iconImageInfo per icon (the iOS 26 layout class is read-only). One-shot at Run on iOS 26 — rotation/page swipe may force iOS 26's auto-layout to re-fit, so re-Run if that happens."
+                                longDescription:@"Adds extra padding around the home grid and the dock, and scales icons up or down. Stacks on top of SBCustomizer.\nDial in left/right/top/bottom padding for the home screen, horizontal padding for the dock, and home/dock icon scale in the Settings tab. Defaults match stock (zero padding, 100% scale).\nApplied at Run; not persisted across respring.\niOS 18: mutates the SBIconController layout configuration directly (upstream kolbicz path).\niOS 26: walks the live SBIconListView/SBIconView hierarchy and adjusts frames + iconImageInfo per icon (the iOS 26 layout class is read-only). One-shot at Run on iOS 26 — rotation/page swipe may force iOS 26's auto-layout to re-fit, so re-Run if that happens."
                                         version:version
                                          author:@"kolbicz"
                                       category:@"Home Screen Layout"
@@ -211,7 +211,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *gravityLite = [[Package alloc] initWithIdentifier:@"com.darksword.gravitylite"
                                            name:@"Gravity Lite"
                                shortDescription:@"Make home-screen icons fall with physics"
-                                longDescription:@"Core RemoteCall-only port of Julio Verne's classic Gravity tweak for iOS 26. Applies UIDynamicAnimator gravity, collision bounds, bounce, friction, resistance, optional dock physics, accelerometer steering, shake pulses, restore, and an explosion pulse to the currently visible SpringBoard icon views.\n\nThis is not a full Substrate-style port. Activator/Home-button hooks, drag gestures, and preference-daemon notifications are intentionally left out. Use Settings to tune the core physics and the Restore button to reset the layout."
+                                longDescription:@"Core RemoteCall-only port of Julio Verne's classic Gravity tweak for iOS 26. Applies UIDynamicAnimator gravity, collision bounds, bounce, friction, resistance, optional dock physics, accelerometer steering, shake pulses, restore, and an explosion pulse to the currently visible SpringBoard icon views.\nThis is not a full Substrate-style port. Activator/Home-button hooks, drag gestures, and preference-daemon notifications are intentionally left out. Use Settings to tune the core physics and the Restore button to reset the layout."
                                         version:version
                                          author:@"Julio Verne / zeroxjf"
                                        category:@"Beta"
@@ -231,7 +231,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *livewp = [[Package alloc] initWithIdentifier:@"com.darksword.livewp"
                                            name:@"Live Wallpaper"
                                shortDescription:@"Play a video as your lock-screen and home-screen wallpaper"
-                                longDescription:@"Loops a user-selected video as a live wallpaper over the lock screen (SBCoverSheetWindow) and home screen (SBHomeScreenWindow) via RemoteCall. Pick any .mp4/.mov in Settings, then run Live Wallpaper to attach the AVPlayerLayer. Stop tears the layer down again.\n\nThe video is decoded twice — one player per window — and remains on screen until you stop the tweak, lock the device, or respring. Performance depends on the source video resolution; 1080p HEVC is the comfortable ceiling on tested devices.\n\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
+                                longDescription:@"Loops a user-selected video as a live wallpaper over the lock screen (SBCoverSheetWindow) and home screen (SBHomeScreenWindow) via RemoteCall. Pick any .mp4/.mov in Settings, then run Live Wallpaper to attach the AVPlayerLayer. Stop tears the layer down again.\nThe video is decoded twice — one player per window — and remains on screen until you stop the tweak, lock the device, or respring. Performance depends on the source video resolution; 1080p HEVC is the comfortable ceiling on tested devices.\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
                                         version:version
                                          author:@"d1y / zeroxjf"
                                        category:@"SpringBoard Tweaks"
@@ -244,7 +244,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *niceBarLite = [[Package alloc] initWithIdentifier:@"com.darksword.nicebarlite"
                                            name:@"NiceBar Lite"
                                shortDescription:@"Five configurable status-bar text slots"
-                                longDescription:@"Place up to five small labels in the status-bar area, each with its own kind (off / custom text / system value / time format / weather), unit (C/F for the battery-temp system item), and styling. Slots are independent: you can show free RAM top-left, custom text top-right, lunar date bottom-center, and so on.\n\nAll values are polled on the Settings-side cadence; the tweak attaches one UIWindow at a low window level so scroll-to-top gestures still pass through to the system status bar.\n\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
+                                longDescription:@"Place up to five small labels in the status-bar area, each with its own kind (off / custom text / system value / time format / weather), unit (C/F for the battery-temp system item), and styling. Slots are independent: you can show free RAM top-left, custom text top-right, lunar date bottom-center, and so on.\nAll values are polled on the Settings-side cadence; the tweak attaches one UIWindow at a low window level so scroll-to-top gestures still pass through to the system status bar.\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
                                         version:version
                                          author:@"d1y / zeroxjf"
                                        category:@"SpringBoard Tweaks"
@@ -257,7 +257,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *nsbar = [[Package alloc] initWithIdentifier:@"com.darksword.nsbar"
                                            name:@"NSBar (Network Speed Bar)"
                                shortDescription:@"Real-time down/up network speed in the status bar"
-                                longDescription:@"Overlays a single label inside the status-bar area that shows live KB/s read and write totals since the last sample. Choose one of five anchor positions. The label width adapts to the current speed text length.\n\nThe tweak samples /var/ifaddrs counters on a fast cadence and writes the formatted result into a UIWindow at the same low window level used by NiceBar Lite. No private APIs are touched.\n\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
+                                longDescription:@"Overlays a single label inside the status-bar area that shows live KB/s read and write totals since the last sample. Choose one of five anchor positions. The label width adapts to the current speed text length.\nThe tweak samples /var/ifaddrs counters on a fast cadence and writes the formatted result into a UIWindow at the same low window level used by NiceBar Lite. No private APIs are touched.\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
                                         version:version
                                          author:@"d1y / zeroxjf"
                                        category:@"SpringBoard Tweaks"
@@ -270,9 +270,9 @@ static const NSInteger kSecAniTime          = 20;
         Package *anitime = [[Package alloc] initWithIdentifier:@"com.darksword.anitime"
                                            name:@"AniTime"
                                shortDescription:@"Animated GIF digits on the lock-screen clock"
-                               longDescription:@"Replaces the four lock-screen clock digits with animated GIFs read from the device's local time. Choose small / compact / normal digit size, tighten or widen the spacing between digits, switch between 12-hour and 24-hour formats, and optionally show seconds.\n\nThe digit GIFs are bundled in the app and ship with every build. They live at Cyanide/tweaks/anitime/0.gif..9.gif.\n\nToggling on a Reapply push re-attaches the current digit set. Toggling off removes the overlay and frees the cached pointers.\n\nD1y tweak: the overlay lives only as long as the active Cyanide SpringBoard session."
+                               longDescription:@"Replaces the four lock-screen clock digits with animated GIFs read from the device's local time. Adjust the spacing between digits and switch between 12-hour and 24-hour formats.\nUse Activate to install and start the overlay, Deactivate to remove it."
                                         version:version
-                                         author:@"zeroxjf"
+                                         author:@"extra"
                                        category:@"LockScreen"
                                      symbolName:@"lock.fill"
                                            kind:PackageInstallKindToggle
@@ -283,7 +283,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *nanoRegistry = [[Package alloc] initWithIdentifier:@"com.darksword.nanoregistry"
                                            name:@"Watch Pairing Override"
                                shortDescription:@"Pair a newer watch or revive an older one"
-                                longDescription:@"Changes the watchOS pairing range saved on this iPhone.\n\nMost people should use watchOS Range 99/23/10/6 in Settings, then apply the override. These are pairing protocol generations, not Apple Watch model numbers. 99 raises the watchOS pairing ceiling. 23 keeps the generation-23 setup protocol accepted. 10 and 6 leave the legacy chip and multi-watch floors at their normal values.\n\nApple Watch Ultra 3 cannot pair on iOS versions below 26 at this time.\n\nSystem-file warning: this modifies the local NanoRegistry compatibility-index MobileAsset and saves a .cyanide.bak backup beside the original file. Pairing-asset edits can fail, partially apply, require a respring or reboot to settle, or leave pairing state inconsistent. You apply or remove this override at your own risk.\n\nRespring or reboot after installing or removing the override before trying to pair."
+                                longDescription:@"Changes the watchOS pairing range saved on this iPhone.\nMost people should use watchOS Range 99/23/10/6 in Settings, then apply the override. These are pairing protocol generations, not Apple Watch model numbers. 99 raises the watchOS pairing ceiling. 23 keeps the generation-23 setup protocol accepted. 10 and 6 leave the legacy chip and multi-watch floors at their normal values.\nApple Watch Ultra 3 cannot pair on iOS versions below 26 at this time.\nSystem-file warning: this modifies the local NanoRegistry compatibility-index MobileAsset and saves a .cyanide.bak backup beside the original file. Pairing-asset edits can fail, partially apply, require a respring or reboot to settle, or leave pairing state inconsistent. You apply or remove this override at your own risk.\nRespring or reboot after installing or removing the override before trying to pair."
                                         version:version
                                          author:@"zeroxjf"
                                        category:@"Beta"
@@ -297,7 +297,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *callRecordingSound = [[Package alloc] initWithIdentifier:@"com.darksword.callrecording-sound"
                                            name:@"Call Recording Sound"
                                shortDescription:@"Silence disclosure start/stop sounds"
-                                longDescription:@"Replaces the CallServices StartDisclosureWithTone and StopDisclosure audio files with Cyanide's bundled silent payloads.\n\nCredits: YangJiiii (@duongduong0908) for the EnsWilde and Disable Call Recording BookRestore reference tools. @Little_34306 is credited by the original projects for the Disable Call Recording concept. Cyanide port, KRW-backed implementation, and generated replacement silent audio assets by zeroxjf.\n\nSystem-file warning: this modifies files under /var/mobile/Library/CallServices/Greetings/default. Cyanide backs up the first originals into its app container, but system file replacement can fail, partially apply, or require a respring/reboot to settle.\n\nLegal note: call-recording disclosure sounds may exist to satisfy consent, notification, or privacy-law requirements in some places. You are responsible for understanding and following the laws that apply to you.\n\nThis port does not use the old Books/BookRestore/sparserestore path. Cyanide runs KRW, unlocks local /private/var write access, then writes directly to the CallServices files.\n\nUse Restore Original Sounds to write Cyanide's backups back when present. You apply or restore this tweak at your own risk."
+                                longDescription:@"Replaces the CallServices StartDisclosureWithTone and StopDisclosure audio files with Cyanide's bundled silent payloads.\nCredits: YangJiiii (@duongduong0908) for the EnsWilde and Disable Call Recording BookRestore reference tools. @Little_34306 is credited by the original projects for the Disable Call Recording concept. Cyanide port, KRW-backed implementation, and generated replacement silent audio assets by zeroxjf.\nSystem-file warning: this modifies files under /var/mobile/Library/CallServices/Greetings/default. Cyanide backs up the first originals into its app container, but system file replacement can fail, partially apply, or require a respring/reboot to settle.\nLegal note: call-recording disclosure sounds may exist to satisfy consent, notification, or privacy-law requirements in some places. You are responsible for understanding and following the laws that apply to you.\nThis port does not use the old Books/BookRestore/sparserestore path. Cyanide runs KRW, unlocks local /private/var write access, then writes directly to the CallServices files.\nUse Restore Original Sounds to write Cyanide's backups back when present. You apply or restore this tweak at your own risk."
                                         version:version
                                          author:@"YangJiiii (@duongduong0908) / zeroxjf"
                                        category:@"Experimental"
@@ -311,7 +311,7 @@ static const NSInteger kSecAniTime          = 20;
         Package *otaBlock = [[Package alloc] initWithIdentifier:@"com.darksword.ota-block"
                                            name:@"OTA Updates"
                                shortDescription:@"Enable or disable over-the-air system updates"
-                                longDescription:@"Disables or enables the launchd jobs responsible for over-the-air system updates by editing disabled.plist. State persists across reboots.\n\nSystem-file warning: this edits /private/var/db/com.apple.xpc.launchd/disabled.plist. Incorrect or partial writes can affect launchd job state across boot. You disable or re-enable OTA updates at your own risk.\n\nNo Run/Apply step required for this package. Use Disable to block OTA updates, or Enable to restore them."
+                                longDescription:@"Disables or enables the launchd jobs responsible for over-the-air system updates by editing disabled.plist. State persists across reboots.\nSystem-file warning: this edits /private/var/db/com.apple.xpc.launchd/disabled.plist. Incorrect or partial writes can affect launchd job state across boot. You disable or re-enable OTA updates at your own risk.\nNo Run/Apply step required for this package. Use Disable to block OTA updates, or Enable to restore them."
                                         version:version
                                          author:@"kolbicz"
                                        category:@"System Updates"
@@ -394,7 +394,7 @@ static const NSInteger kSecAniTime          = 20;
                 Package *drag = [[Package alloc] initWithIdentifier:@"com.darksword.drag-coefficient"
                                                                name:@"Drag Coefficient"
                                                    shortDescription:@"Custom SpringBoard animation speed multiplier"
-                                                    longDescription:@"Overrides _UIAnimationDragCoefficient in SpringBoard to make all UIKit spring animations faster or slower.\n\nSet the coefficient in the Drag Coefficient settings panel. 50% = 0.50× (2× faster), 25% = 0.25× (4× faster), 100% = stock.\n\nImported from kolbicz/DarkSword-Tweaks."
+                                                    longDescription:@"Overrides _UIAnimationDragCoefficient in SpringBoard to make all UIKit spring animations faster or slower.\nSet the coefficient in the Drag Coefficient settings panel. 50% = 0.50× (2× faster), 25% = 0.25× (4× faster), 100% = stock.\nImported from kolbicz/DarkSword-Tweaks."
                                                             version:version
                                                              author:@"kolbicz"
                                                            category:@"SpringBoard Tweaks"

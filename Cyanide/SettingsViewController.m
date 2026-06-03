@@ -49,6 +49,8 @@
 #import <sys/utsname.h>
 #import <time.h>
 #import <unistd.h>
+#import <ImageIO/ImageIO.h>
+#import <MobileCoreServices/MobileCoreServices.h>
 
 @interface DSRespringOverlayView : UIView
 @property (nonatomic, strong) WKWebView *webView;
@@ -235,10 +237,8 @@ NSString * const kSettingsNSBarEnabled = @"NSBarEnabled";
 NSString * const kSettingsNSBarPosition = @"NSBarPosition";
 
 NSString * const kSettingsAniTimeEnabled      = @"AniTimeEnabled";
-NSString * const kSettingsAniTimeSize          = @"AniTimeSize";
 NSString * const kSettingsAniTimeSpacing       = @"AniTimeSpacing";
-NSString * const kSettingsAniTimeFormat24h     = @"AniTimeFormat24h";
-NSString * const kSettingsAniTimeShowSeconds   = @"AniTimeShowSeconds";
+NSString * const kSettingsAniTimeFormat        = @"AniTimeFormat";
 
 NSString * const kSettingsLocationSimEnabled = @"LocationSimEnabled";
 NSString * const kSettingsLocationSimLatitude = @"LocationSimLatitude";
@@ -2732,7 +2732,8 @@ static void settings_start_anitime_per_second_loop(void)
                         !g_springboard_rc_ready ||
                         ![d boolForKey:kSettingsAniTimeEnabled]) return;
                     AniTimeConfig cfg = anitime_config_from_defaults();
-                    bool ok = anitime_apply_in_session(cfg);
+                    AniTimeFormat fmt = anitime_format_from_defaults();
+                    bool ok = anitime_apply_in_session(cfg, fmt);
                     if (ok) {
                         settings_mark_tweak_applied(kSettingsAniTimeEnabled, YES);
                     }
@@ -3554,10 +3555,8 @@ static BOOL settings_key_is_gravitylite(NSString *key)
 static BOOL settings_key_is_anitime(NSString *key)
 {
     return [key isEqualToString:kSettingsAniTimeEnabled] ||
-           [key isEqualToString:kSettingsAniTimeSize] ||
            [key isEqualToString:kSettingsAniTimeSpacing] ||
-           [key isEqualToString:kSettingsAniTimeFormat24h] ||
-           [key isEqualToString:kSettingsAniTimeShowSeconds];
+           [key isEqualToString:kSettingsAniTimeFormat];
 }
 
 static BOOL settings_key_is_location_sim(NSString *key)
@@ -3926,8 +3925,6 @@ static void settings_schedule_live_apply_for_key(NSString *key)
 
     if (settings_key_is_anitime(key)) {
         if ([d boolForKey:kSettingsAniTimeEnabled] && g_springboard_rc_ready) {
-            // AniTime runs a per-second loop; that loop reads defaults every
-            // tick, so just nudging it (start if not running) is enough.
             settings_start_anitime_per_second_loop();
             settings_notify_package_queue_changed_async();
         } else if (![d boolForKey:kSettingsAniTimeEnabled]) {
@@ -4199,11 +4196,9 @@ void settings_register_defaults(void)
         kSettingsNSBarEnabled:  @NO,
         kSettingsNSBarPosition: @0,
 
-        kSettingsAniTimeEnabled:     @YES,
-        kSettingsAniTimeSize:         @2,    // Normal
+        kSettingsAniTimeEnabled:     @NO,
         kSettingsAniTimeSpacing:      @4,
-        kSettingsAniTimeFormat24h:    @NO,   // 12h
-        kSettingsAniTimeShowSeconds:  @NO,
+        kSettingsAniTimeFormat:       @0,    // 12h
 
         kSettingsLocationSimEnabled: @NO,
         kSettingsLocationSimLatitude: @(kLocationSimDefaultLatitude),
@@ -4631,10 +4626,15 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                     if (runAniTime) {
                         settings_progress(&step, total, "Starting AniTime lock-screen clock overlay");
                         AniTimeConfig cfg = anitime_config_from_defaults();
-                        bool ok = anitime_apply_in_session(cfg);
+                        AniTimeFormat fmt = anitime_format_from_defaults();
+                        NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
+                        printf("[SETTINGS] AniTime run-path apply: start\n");
+                        bool ok = anitime_apply_in_session(cfg, fmt);
+                        NSTimeInterval t1 = [NSDate timeIntervalSinceReferenceDate];
                         settings_mark_tweak_applied(kSettingsAniTimeEnabled,
                                                     ok && [d boolForKey:kSettingsAniTimeEnabled]);
-                        printf("[SETTINGS] AniTime result=%d\n", ok);
+                        printf("[SETTINGS] AniTime result=%d (run-path apply took %.3fs)\n",
+                               ok, t1 - t0);
                         log_user("%s AniTime %s.\n",
                                  ok ? "[OK]" : "[WARN]",
                                  ok ? "digit overlay attached" : "did not start cleanly");
@@ -4642,7 +4642,10 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         if (ok) settings_start_anitime_per_second_loop();
                     } else if (!anitimeEnabled) {
                         settings_end_anitime_per_second_loop("AniTime disabled at run");
+                        NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
                         anitime_stop_in_session();
+                        NSTimeInterval t1 = [NSDate timeIntervalSinceReferenceDate];
+                        printf("[SETTINGS] AniTime run-path stop took %.3fs\n", t1 - t0);
                     }
                 }
 
@@ -5748,21 +5751,89 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     ];
 }
 
-#pragma mark - AniTime rows (d1y)
+#pragma mark - AniTime rows (by extra)
+
+// Decode every frame of a GIF via ImageIO so the preview UIImageView can
+// play the whole loop. +[UIImage imageWithData:] only returns the first
+// frame, which made the preview look static. We also return the total
+// animation duration out-of-band so the caller can build an animated
+// UIImage with the correct playback rate.
++ (NSDictionary *)anitimeDecodeGifData:(NSData *)data
+{
+    if (data.length == 0) return nil;
+    CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    if (!src) return nil;
+    size_t count = CGImageSourceGetCount(src);
+    NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
+    NSTimeInterval total = 0.0;
+    CGFloat scale = UIScreen.mainScreen.scale;
+    for (size_t i = 0; i < count; i++) {
+        CGImageRef img = CGImageSourceCreateImageAtIndex(src, i, NULL);
+        if (!img) continue;
+        // Use the image's own scale (0 means honour the source pixels) so
+        // we don't accidentally upscale a tiny GIF and then have UIImageView
+        // refuse to animate it as a sequence.
+        CGFloat frameScale = 1.0;
+        CFDictionaryRef props = CGImageSourceCopyPropertiesAtIndex(src, i, NULL);
+        if (props) {
+            CFNumberRef pxW = CFDictionaryGetValue(props, kCGImagePropertyPixelWidth);
+            CFNumberRef pxH = CFDictionaryGetValue(props, kCGImagePropertyPixelHeight);
+            CGFloat w = 0, h = 0;
+            if (pxW) CFNumberGetValue(pxW, kCFNumberCGFloatType, &w);
+            if (pxH) CFNumberGetValue(pxH, kCFNumberCGFloatType, &h);
+            if (w > 0 && h > 0) {
+                // Honour the source's natural scale; if the GIF was authored
+                // at 2x/3x, we keep that, otherwise we use the screen scale
+                // so retina devices don't get blurry frames.
+                frameScale = scale;
+            }
+            CFRelease(props);
+        }
+        UIImage *ui = [UIImage imageWithCGImage:img scale:frameScale orientation:UIImageOrientationUp];
+        CGImageRelease(img);
+        if (ui) [frames addObject:ui];
+
+        CFDictionaryRef frameProps = CGImageSourceCopyPropertiesAtIndex(src, i, NULL);
+        if (frameProps) {
+            CFDictionaryRef gifDict = CFDictionaryGetValue(frameProps, kCGImagePropertyGIFDictionary);
+            if (gifDict) {
+                CFNumberRef delay = CFDictionaryGetValue(gifDict, kCGImagePropertyGIFUnclampedDelayTime);
+                if (!delay) delay = CFDictionaryGetValue(gifDict, kCGImagePropertyGIFDelayTime);
+                double d = 0;
+                if (delay && CFNumberGetValue(delay, kCFNumberDoubleType, &d)) {
+                    if (d <= 0) d = 0.1; // browsers treat 0 as 100ms
+                    total += d;
+                } else {
+                    total += 0.1;
+                }
+            } else {
+                total += 0.1;
+            }
+            CFRelease(frameProps);
+        } else {
+            total += 0.1;
+        }
+    }
+    CFRelease(src);
+    if (frames.count == 0) return nil;
+    if (total <= 0) total = MAX(0.1, (double)frames.count * 0.1);
+    return @{ @"frames": frames, @"duration": @(total) };
+}
 
 - (NSArray<NSDictionary *> *)anitimeRows
 {
-    NSArray<NSString *> *sizes = @[ @"Small", @"Compact", @"Normal" ];
     NSArray<NSString *> *formats = @[ @"12-hour", @"24-hour" ];
     return @[
+        // Live preview: animates a fixed HH:MM sample (1 2 : 3 4) so the user
+        // can see the digit GIFs playing right at the top of the section.
+        @{ @"kind": @"anitime-preview" },
+
+        // Single on/off control. Tweak by extra: Spacing + Format apply when
+        // the overlay is active; the actual show/hide is done by the buttons
+        // below (which also flip the same key).
         @{ @"kind": @"toggle",
            @"key": kSettingsAniTimeEnabled,
-           @"title": @"Enable AniTime" },
-        @{ @"kind": @"segment",
-           @"key": kSettingsAniTimeSize,
-           @"title": @"Size",
-           @"options": sizes,
-           @"default": @2 },
+           @"title": @"Enabled" },
         @{ @"kind": @"slider",
            @"key": kSettingsAniTimeSpacing,
            @"title": @"Spacing",
@@ -5772,21 +5843,15 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
            @"unit": @"pt",
            @"default": @4 },
         @{ @"kind": @"segment",
-           @"key": kSettingsAniTimeFormat24h,
+           @"key": kSettingsAniTimeFormat,
            @"title": @"Format",
            @"options": formats,
            @"default": @0 },
-        @{ @"kind": @"toggle",
-           @"key": kSettingsAniTimeShowSeconds,
-           @"title": @"Show seconds" },
-        @{ @"kind": @"info",
-           @"title": @"GIFs",
-           @"subtitle": @"Bundled 0.gif–9.gif. Use the picker to swap to your own folder of digit GIFs." },
         @{ @"kind": @"button",
-           @"title": @"Reapply AniTime",
+           @"title": @"Activate AniTime",
            @"action": @"anitime-apply" },
         @{ @"kind": @"button",
-           @"title": @"Stop AniTime",
+           @"title": @"Deactivate AniTime",
            @"action": @"anitime-stop",
            @"destructive": @YES },
     ];
@@ -6097,9 +6162,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     }
     if (s == SectionAniTime) {
         return @"Replaces the four lock-screen clock digits with animated GIFs. Time is read from the device clock and refreshed every second.\n\n"
-               @"Bundled digit GIFs live at Cyanide/tweaks/anitime/0.gif..9.gif and ship inside the app bundle. Use the file picker to swap to your own folder of digit GIFs.\n\n"
-               @"Size controls overall digit height. Spacing is the gap between digits. Format toggles 12h / 24h. Show seconds renders six digits instead of four.\n\n"
-               @"AniTime is a d1y tweak: Run opens the SpringBoard channel and Reapply re-pushes the current digit set. Toggling the master switch removes the overlay.";
+               @"Size controls overall digit height. Spacing is the gap between digits. Format toggles 12h / 24h.\n\n"
+               @"Use Activate to install and start the overlay, Deactivate to remove it.\n\n"
+               @"Tweak by user extra.";
     }
     return nil;
 }
@@ -6764,27 +6829,36 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     });
 }
 
-#pragma mark - AniTime (d1y) helpers
+#pragma mark - AniTime (by extra) helpers
 
 - (void)applyAniTimeNow
 {
+    NSTimeInterval hostStart = [NSDate timeIntervalSinceReferenceDate];
+    printf("[SETTINGS] AniTime manual apply: host start\n");
     if (!g_springboard_rc_ready) {
-        [self runTweaksRequested:@"Apply AniTime now? Run kexploit first."];
+        [self runTweaksRequested:@"Activate AniTime now? Run kexploit first."];
         return;
     }
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    if (![d boolForKey:kSettingsAniTimeEnabled]) {
-        [d setBool:YES forKey:kSettingsAniTimeEnabled];
-        [d synchronize];
-    }
+    [d setBool:YES forKey:kSettingsAniTimeEnabled];
+    [d synchronize];
     AniTimeConfig cfg = anitime_config_from_defaults();
+    AniTimeFormat fmt = anitime_format_from_defaults();
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSTimeInterval queueStart = [NSDate timeIntervalSinceReferenceDate];
         @synchronized (settings_rc_lock()) {
+            NSTimeInterval lockStart = [NSDate timeIntervalSinceReferenceDate];
             if (!g_springboard_rc_ready) return;
-            bool ok = anitime_apply_in_session(cfg);
+            bool ok = anitime_apply_in_session(cfg, fmt);
+            NSTimeInterval lockEnd = [NSDate timeIntervalSinceReferenceDate];
             settings_mark_tweak_applied(kSettingsAniTimeEnabled,
                                         ok && [d boolForKey:kSettingsAniTimeEnabled]);
-            printf("[SETTINGS] AniTime manual apply result=%d\n", ok);
+            printf("[SETTINGS] AniTime manual apply result=%d (rc lock held %.3fs; "
+                   "queue wait %.3fs; host→queue %.3fs)\n",
+                   ok,
+                   lockEnd - lockStart,
+                   queueStart - hostStart,
+                   queueStart - hostStart);
         }
         settings_start_anitime_per_second_loop();
         settings_notify_package_queue_changed_async();
@@ -6793,10 +6867,20 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 
 - (void)stopAniTimeNow
 {
-    settings_end_anitime_per_second_loop("AniTime stopped");
+    NSTimeInterval hostStart = [NSDate timeIntervalSinceReferenceDate];
+    printf("[SETTINGS] AniTime manual stop: host start\n");
+    settings_end_anitime_per_second_loop("AniTime deactivated");
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSTimeInterval queueStart = [NSDate timeIntervalSinceReferenceDate];
         @synchronized (settings_rc_lock()) {
+            NSTimeInterval lockStart = [NSDate timeIntervalSinceReferenceDate];
             if (g_springboard_rc_ready) anitime_stop_in_session();
+            NSTimeInterval lockEnd = [NSDate timeIntervalSinceReferenceDate];
+            printf("[SETTINGS] AniTime manual stop: rc lock held %.3fs; "
+                   "queue wait %.3fs; host→queue %.3fs\n",
+                   lockEnd - lockStart,
+                   queueStart - hostStart,
+                   queueStart - hostStart);
         }
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kSettingsAniTimeEnabled];
         [[NSUserDefaults standardUserDefaults] synchronize];
@@ -7922,6 +8006,100 @@ void cyanide_present_contact(UIViewController *host)
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     BOOL supported = settings_device_supported();
 
+    if ([kind isEqualToString:@"anitime-preview"]) {
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"anitime-preview"];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"anitime-preview"];
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.userInteractionEnabled = NO;
+        cell.accessoryView = nil;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.textLabel.text = nil;
+        cell.detailTextLabel.text = nil;
+        cell.imageView.image = nil;
+        for (UIView *v in [cell.contentView.subviews copy]) [v removeFromSuperview];
+
+        UILabel *title = [[UILabel alloc] init];
+        title.translatesAutoresizingMaskIntoConstraints = NO;
+        title.text = @"Preview";
+        title.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
+        title.textColor = UIColor.labelColor;
+
+        UIStackView *stack = [[UIStackView alloc] init];
+        stack.translatesAutoresizingMaskIntoConstraints = NO;
+        stack.axis = UILayoutConstraintAxisHorizontal;
+        stack.alignment = UIStackViewAlignmentCenter;
+        // Keep the digit pair (3,4) close to the rest of the row instead of
+        // letting the trailing constraint push them to the far edge.
+        stack.distribution = UIStackViewDistributionFill;
+        stack.spacing = 2.0;
+
+        // Five slots: 1, 2, dash, 3, 4 — fixed demo so the preview is always
+        // recognisable regardless of the wall clock. We extract every GIF
+        // frame via CGImageSource and build an animated UIImage so the
+        // preview actually plays the loop, not just frame 0.
+        NSArray<NSString *> *demoNames = @[ @"1", @"2", @"dash", @"3", @"4" ];
+        for (NSString *name in demoNames) {
+            UIImageView *iv = [[UIImageView alloc] init];
+            iv.translatesAutoresizingMaskIntoConstraints = NO;
+            iv.contentMode = UIViewContentModeScaleAspectFit;
+            NSString *path = [[NSBundle mainBundle] pathForResource:name ofType:@"gif"];
+            NSData *bytes = path ? [NSData dataWithContentsOfFile:path] : nil;
+            if (bytes.length > 0) {
+                NSDictionary *decoded = [self.class anitimeDecodeGifData:bytes];
+                NSArray<UIImage *> *frames = decoded[@"frames"];
+                NSTimeInterval dur = [decoded[@"duration"] doubleValue];
+                if (frames.count >= 2 && dur > 0) {
+                    UIImage *animated = [UIImage animatedImageWithImages:frames duration:dur];
+                    if (animated) {
+                        iv.image = animated;
+                    } else {
+                        iv.image = frames.firstObject;
+                        iv.animationImages = frames;
+                        iv.animationDuration = dur;
+                        iv.animationRepeatCount = 0;
+                    }
+                } else if (frames.count == 1) {
+                    // Single-frame "GIF" (static image). Still show it so the
+                    // user knows the file is present.
+                    iv.image = frames.firstObject;
+                }
+            }
+            [iv.widthAnchor constraintEqualToConstant:36.0].active = YES;
+            [iv.heightAnchor constraintEqualToConstant:60.0].active = YES;
+            [stack addArrangedSubview:iv];
+        }
+
+        // Use a content-hugging wrapper so the title and the row of digits
+        // sit side-by-side without the row being pushed to the trailing edge
+        // (which made the minute pair look far apart from the rest).
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[ title, stack ]];
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+        row.axis = UILayoutConstraintAxisHorizontal;
+        row.alignment = UIStackViewAlignmentCenter;
+        row.spacing = 12.0;
+        row.distribution = UIStackViewDistributionFill;
+
+        [cell.contentView addSubview:row];
+        UILayoutGuide *m = cell.contentView.layoutMarginsGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [row.leadingAnchor constraintEqualToAnchor:m.leadingAnchor],
+            [row.trailingAnchor constraintEqualToAnchor:m.trailingAnchor],
+            [row.topAnchor constraintEqualToAnchor:m.topAnchor],
+            [row.bottomAnchor constraintEqualToAnchor:m.bottomAnchor],
+
+            // Keep the digit row compact: the stack should hug its content
+            // instead of stretching to fill the cell, so the trailing
+            // minutes pair stays tight against the rest.
+            [stack setContentHuggingPriority:UILayoutPriorityRequired
+                                      forAxis:UILayoutConstraintAxisHorizontal],
+            [stack setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                                   forAxis:UILayoutConstraintAxisHorizontal],
+        ]];
+        return cell;
+    }
+
     if ([kind isEqualToString:@"info"]) {
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"info"];
         if (!cell) {
@@ -8108,6 +8286,14 @@ void cyanide_present_contact(UIViewController *host)
     [sw addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = sw;
     return cell;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    if (indexPath.section == SectionAniTime && indexPath.row == 0) {
+        return 84.0;
+    }
+    return UITableViewAutomaticDimension;
 }
 
 #pragma mark - Actions
