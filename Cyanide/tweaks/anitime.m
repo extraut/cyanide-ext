@@ -117,9 +117,9 @@ static uint64_t anitime_find_cover_sheet_window(void)
 {
     uint64_t UIApp = r_class("UIApplication");
     if (!r_is_objc_ptr(UIApp)) return 0;
-    uint64_t app = r_msg2_main(UIApp, "sharedApplication", 0, 0, 0);
+    uint64_t app = r_msg2_main(UIApp, "sharedApplication", 0, 0, 0, 0);
     if (!r_is_objc_ptr(app)) return 0;
-    uint64_t windows = r_msg2_main(app, "windows", 0, 0, 0);
+    uint64_t windows = r_msg2_main(app, "windows", 0, 0, 0, 0);
     if (!r_is_objc_ptr(windows)) {
         return r_msg2_main(app, "keyWindow", 0, 0, 0);
     }
