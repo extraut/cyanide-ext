@@ -28,7 +28,10 @@ static uint64_t g_livewp_looper = 0;
 static uint64_t g_livewp_home_window = 0;
 static uint64_t g_livewp_lock_window = 0;
 static bool g_livewp_configured = false;
-static id g_livewp_loop_observer = nil;        // AVPlayerItem.didPlayToEndTime observer — drives seamless loop
+static double g_livewp_duration_sec = 0.0;     // cached item duration, read once at create time
+static CFAbsoluteTime g_livewp_loop_started = 0; // wall-clock anchor of current loop iteration
+static dispatch_source_t g_livewp_loop_source = NULL;
+static dispatch_queue_t  g_livewp_loop_queue  = NULL;
  
 typedef struct { double x, y, w, h; } LiveWPRect;
  
@@ -46,6 +49,8 @@ NSString * const kLiveWPVideoPath = @"LiveWPVideoPath";
 static bool livewp_create_player(NSString *videoPath);
 static bool livewp_attach_and_play(void);
 static void livewp_cleanup(void);
+static void livewp_start_loop_timer(void);
+static void livewp_stop_loop_timer(void);
  
 // ============================================================================
 // MARK: - Public Interface
@@ -75,20 +80,13 @@ bool livewp_apply_in_session(void)
     if (g_livewp_configured) {
         livewp_stop_in_session();
         usleep(100000);
-    } else if (g_livewp_loop_observer) {
-        // Defensive: if a previous run left the loop observer around
-        // (e.g. crash recovery, hot reload), tear it down before we
-        // register a fresh one. livewp_stop_in_session would normally
-        // do this through livewp_cleanup, but g_livewp_configured may
-        // already be false in some error paths.
-        [[NSNotificationCenter defaultCenter] removeObserver:g_livewp_loop_observer];
-        g_livewp_loop_observer = nil;
     }
- 
+
     if (!livewp_create_player(videoPath)) return false;
     if (!livewp_attach_and_play()) { livewp_cleanup(); return false; }
- 
+
     g_livewp_configured = true;
+    livewp_start_loop_timer();
     log_user("[LIVEWP] OK: playing.\n");
     return true;
 }
@@ -96,7 +94,9 @@ bool livewp_apply_in_session(void)
 bool livewp_stop_in_session(void)
 {
     if (!g_livewp_configured) return true;
- 
+
+    livewp_stop_loop_timer();
+
     if (r_is_objc_ptr(g_livewp_player))
         r_msg2_main(g_livewp_player, "pause", 0, 0, 0, 0);
  
@@ -118,6 +118,7 @@ bool livewp_stop_in_session(void)
 bool livewp_pause_in_session(void)
 {
     if (!g_livewp_configured) return true;
+    livewp_stop_loop_timer();
     if (!r_is_objc_ptr(g_livewp_player)) {
         // Remote state lost between configure and pause — fall back to a
         // full repair so the next wake has a working player.
@@ -126,7 +127,7 @@ bool livewp_pause_in_session(void)
     r_msg2_main(g_livewp_player, "pause", 0, 0, 0, 0);
     return true;
 }
- 
+
 bool livewp_resume_in_session(void)
 {
     if (!g_livewp_configured) return true;
@@ -136,13 +137,20 @@ bool livewp_resume_in_session(void)
         NSString *path = livewp_absolute_path();
         if (!path.length) return false;
         if (!livewp_create_player(path)) return false;
-        return livewp_attach_and_play();
+        if (!livewp_attach_and_play()) return false;
+        livewp_start_loop_timer();
+        return true;
     }
     // Make sure both layers are still attached to the (possibly recycled)
     // SpringBoard windows before resuming playback — that is what fixes
     // the "icons disappear for a couple seconds after unlock" symptom.
     if (!livewp_attach_and_play()) return false;
     r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
+    // Reset the loop anchor: seek-to-zero+play below restarted
+    // playback from the head, and the cached wall-clock anchor of the
+    // previous loop iteration is now stale.
+    g_livewp_loop_started = CFAbsoluteTimeGetCurrent();
+    livewp_start_loop_timer();
     return true;
 }
  
@@ -212,10 +220,7 @@ bool livewp_swap_video_in_session(NSString *videoPath)
  
 void livewp_forget_remote_state(void)
 {
-    if (g_livewp_loop_observer) {
-        [[NSNotificationCenter defaultCenter] removeObserver:g_livewp_loop_observer];
-        g_livewp_loop_observer = nil;
-    }
+    livewp_stop_loop_timer();
     g_livewp_player = 0;
     g_livewp_home_layer = 0;
     g_livewp_lock_layer = 0;
@@ -224,6 +229,8 @@ void livewp_forget_remote_state(void)
     g_livewp_home_window = 0;
     g_livewp_lock_window = 0;
     g_livewp_configured = false;
+    g_livewp_duration_sec = 0.0;
+    g_livewp_loop_started = 0;
 }
  
 // ============================================================================
@@ -278,34 +285,18 @@ static bool livewp_create_player(NSString *videoPath)
     //      to attempt advancing an empty queue, stopping playback entirely.
     r_msg2_main(player, "setActionAtItemEnd:", (uint64_t)1 /* AVPlayerActionAtItemEndPause */, 0, 0, 0);
 
-    // Seamless loop: observe AVPlayerItemDidPlayToEndTimeNotification on
-    // the playerItem. When the item reaches its end, seek back to zero
-    // and play. This is the softest possible loop driver — driven by
-    // AVFoundation's own notification, no periodic timer, no layer tree
-    // mutation, no extra r_msg2 round-trips per loop. The observer is
-    // torn down in livewp_cleanup and livewp_forget_remote_state.
+    // Cache item duration ONCE so the periodic loop tick doesn't have to
+    // round-trip into SpringBoard on every tick. We do this with a
+    // single r_msg2_main_struct_ret call here; the per-tick cost is just
+    // a CFAbsoluteTime subtraction on our side.
     {
-        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-        if (nc) {
-            uint64_t playerForObs = player;
-            g_livewp_loop_observer = [nc addObserverForName:@"AVPlayerItemDidPlayToEndTimeNotification"
-                                                     object:(__bridge id)(void *)playerItem
-                                                      queue:nil
-                                                 usingBlock:^(NSNotification * _Nonnull note) {
-                (void)note;
-                // Use the player reference captured at observer-registration
-                // time, not the live g_livewp_player global. If the user
-                // hot-swap videos via livewp_swap_video_in_session the
-                // global may have moved on; the original player is still
-                // the one whose item just finished and wants to rewind.
-                struct { long long v; long long ts; } zero = {0, 0};
-                r_msg2_main_raw(playerForObs, "seekToTime:",
-                                &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
-                r_msg2_main(playerForObs, "play", 0, 0, 0, 0);
-            }];
-        }
+        struct { long long v; long long ts; } dur = {0, 0};
+        r_msg2_main_struct_ret(playerItem, "duration", &dur, sizeof(dur),
+                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+        g_livewp_duration_sec = (dur.ts > 0) ? (double)dur.v / (double)dur.ts : 0.0;
+        g_livewp_loop_started = CFAbsoluteTimeGetCurrent();
     }
- 
+
     // 两个 layer：一个给主屏幕，一个给锁屏
     uint64_t homeLayer = livewp_make_layer(player);
     uint64_t lockLayer = livewp_make_layer(player);
@@ -450,10 +441,7 @@ static bool livewp_attach_and_play(void)
  
 static void livewp_cleanup(void)
 {
-    if (g_livewp_loop_observer) {
-        [[NSNotificationCenter defaultCenter] removeObserver:g_livewp_loop_observer];
-        g_livewp_loop_observer = nil;
-    }
+    livewp_stop_loop_timer();
     g_livewp_player = 0;
     g_livewp_player_item = 0;
     g_livewp_home_layer = 0;
@@ -461,6 +449,58 @@ static void livewp_cleanup(void)
     g_livewp_looper = 0;
     g_livewp_home_window = 0;
     g_livewp_lock_window = 0;
+    g_livewp_duration_sec = 0.0;
+    g_livewp_loop_started = 0;
 }
- 
+
+// Loop tick. We don't ask the AVPlayer how far it has progressed on
+// every tick — that would be a RemoteCall round-trip on every fire.
+// Instead, we cache the item duration at create time and watch a
+// local wall-clock anchor. When the anchor expires, we rewind+play.
+// Zero r_msg2 per tick, two r_msg2 per loop boundary.
+static void livewp_loop_tick(void)
+{
+    if (!g_livewp_configured) return;
+    if (!r_is_objc_ptr(g_livewp_player)) return;
+    if (g_livewp_duration_sec <= 0.0) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    double elapsed = now - g_livewp_loop_started;
+    if (elapsed < g_livewp_duration_sec) return;
+    // Loop boundary. Rewind and replay.
+    struct { long long v; long long ts; } zero = {0, 0};
+    r_msg2_main_raw(g_livewp_player, "seekToTime:",
+                    &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
+    r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
+    g_livewp_loop_started = now;
+}
+
+static void livewp_start_loop_timer(void)
+{
+    if (g_livewp_loop_source) return;
+    if (!g_livewp_loop_queue) {
+        g_livewp_loop_queue = dispatch_queue_create("cyanide.livewp.loop", DISPATCH_QUEUE_SERIAL);
+    }
+    dispatch_source_t src = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_livewp_loop_queue);
+    if (!src) return;
+    // Tick every 1 second. The tick itself just compares wall-clock
+    // elapsed to the cached duration; the actual seek+play only fires
+    // once per loop boundary, not on every tick. 1s cadence means we
+    // rewind within ~1s of the true loop point, which is imperceptible
+    // for a video loop.
+    dispatch_source_set_timer(src,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC),
+                              (uint64_t)NSEC_PER_SEC,
+                              (uint64_t)(NSEC_PER_SEC / 4));
+    dispatch_source_set_event_handler(src, ^{ livewp_loop_tick(); });
+    g_livewp_loop_source = src;
+    dispatch_resume(src);
+}
+
+static void livewp_stop_loop_timer(void)
+{
+    dispatch_source_t src = g_livewp_loop_source;
+    g_livewp_loop_source = NULL;
+    if (!src) return;
+    dispatch_source_cancel(src);
+} 
 
