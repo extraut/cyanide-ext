@@ -60,6 +60,29 @@ extern NSString * const kSettingsGravityLiteResistancePct;
 
 extern NSString * const kSettingsStageStripEnabled;
 
+// LiveWP (d1y): live wallpaper from a video file picked by the user.
+extern NSString * const kSettingsLiveWPEnabled;
+extern NSString * const kSettingsLiveWPVideoPath;
+
+// NiceBar Lite (d1y): up to 5 status-bar text slots with custom/system content.
+extern NSString * const kSettingsNiceBarLiteEnabled;
+// Per-slot: kind (off=0, custom=1, system=2, time=3, weather=4)
+// Per-slot: system item (battery temp=0, free RAM=1, battery %=2, net speed=3, uptime=4, date=5, lunar=6)
+// Per-slot: custom text (when kind=1)
+// Per-slot: time format (when kind=3)
+// Per-slot: weather text (when kind=4)
+// Unit (C/F toggle for battery temp)
+extern NSString * const kSettingsNiceBarLiteCelsius;
+extern NSString * const kSettingsNiceBarLiteSlotKind[5];
+extern NSString * const kSettingsNiceBarLiteSlotSystemItem[5];
+extern NSString * const kSettingsNiceBarLiteSlotCustomText[5];
+extern NSString * const kSettingsNiceBarLiteSlotTimeFormat[5];
+extern NSString * const kSettingsNiceBarLiteSlotWeatherText[5];
+
+// NSBar (d1y): real-time network speed overlay in the status bar.
+extern NSString * const kSettingsNSBarEnabled;
+extern NSString * const kSettingsNSBarPosition;  // 0..4 (top-left, bottom-left, top-right, bottom-right, center)
+
 extern NSString * const kSettingsLocationSimLatitude;
 extern NSString * const kSettingsLocationSimLongitude;
 extern NSString * const kSettingsLocationSimAltitude;

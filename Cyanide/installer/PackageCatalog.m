@@ -22,6 +22,9 @@ static const NSInteger kSecNanoRegistry     = 13;
 static const NSInteger kSecThemer           = 14;
 static const NSInteger kSecLocationSim      = 15;
 static const NSInteger kSecGravityLite      = 16;
+static const NSInteger kSecLiveWP           = 17;
+static const NSInteger kSecNiceBarLite      = 18;
+static const NSInteger kSecNSBar            = 19;
 
 + (NSArray<Package *> *)allPackages
 {
@@ -226,6 +229,45 @@ static const NSInteger kSecGravityLite      = 16;
             @"Install is slow as hell. WIP. Cyanide has to capture every visible icon and widget before physics start.",
             @"Page swipes, folder opens, or SpringBoard relayouts may stop the effect. Run Gravity again.",
         ];
+
+        Package *livewp = [[Package alloc] initWithIdentifier:@"com.darksword.livewp"
+                                           name:@"Live Wallpaper"
+                               shortDescription:@"Play a video as your lock-screen and home-screen wallpaper"
+                                longDescription:@"Loops a user-selected video as a live wallpaper over the lock screen (SBCoverSheetWindow) and home screen (SBHomeScreenWindow) via RemoteCall. Pick any .mp4/.mov in Settings, then run Live Wallpaper to attach the AVPlayerLayer. Stop tears the layer down again.\n\nThe video is decoded twice — one player per window — and remains on screen until you stop the tweak, lock the device, or respring. Performance depends on the source video resolution; 1080p HEVC is the comfortable ceiling on tested devices.\n\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
+                                        version:version
+                                         author:@"d1y / zeroxjf"
+                                       category:@"Tweaks"
+                                     symbolName:@"play.rectangle.on.rectangle.fill"
+                                           kind:PackageInstallKindToggle
+                                     enabledKey:kSettingsLiveWPEnabled
+                                          isNew:YES];
+        livewp.settingsSection = kSecLiveWP;
+
+        Package *niceBarLite = [[Package alloc] initWithIdentifier:@"com.darksword.nicebarlite"
+                                           name:@"NiceBar Lite"
+                               shortDescription:@"Five configurable status-bar text slots"
+                                longDescription:@"Place up to five small labels in the status-bar area, each with its own kind (off / custom text / system value / time format / weather), unit (C/F for the battery-temp system item), and styling. Slots are independent: you can show free RAM top-left, custom text top-right, lunar date bottom-center, and so on.\n\nAll values are polled on the Settings-side cadence; the tweak attaches one UIWindow at a low window level so scroll-to-top gestures still pass through to the system status bar.\n\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
+                                        version:version
+                                         author:@"d1y / zeroxjf"
+                                       category:@"Tweaks"
+                                     symbolName:@"rectangle.split.3x1"
+                                           kind:PackageInstallKindToggle
+                                     enabledKey:kSettingsNiceBarLiteEnabled
+                                          isNew:YES];
+        niceBarLite.settingsSection = kSecNiceBarLite;
+
+        Package *nsbar = [[Package alloc] initWithIdentifier:@"com.darksword.nsbar"
+                                           name:@"NSBar (Network Speed Bar)"
+                               shortDescription:@"Real-time down/up network speed in the status bar"
+                                longDescription:@"Overlays a single label inside the status-bar area that shows live KB/s read and write totals since the last sample. Choose one of five anchor positions. The label width adapts to the current speed text length.\n\nThe tweak samples /var/ifaddrs counters on a fast cadence and writes the formatted result into a UIWindow at the same low window level used by NiceBar Lite. No private APIs are touched.\n\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
+                                        version:version
+                                         author:@"d1y / zeroxjf"
+                                       category:@"Tweaks"
+                                     symbolName:@"gauge.with.dots.needle.67percent"
+                                           kind:PackageInstallKindToggle
+                                     enabledKey:kSettingsNSBarEnabled
+                                          isNew:YES];
+        nsbar.settingsSection = kSecNSBar;
 
         Package *nanoRegistry = [[Package alloc] initWithIdentifier:@"com.darksword.nanoregistry"
                                            name:@"Watch Pairing Override"

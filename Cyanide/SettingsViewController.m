@@ -22,6 +22,9 @@
 #import "tweaks/themer.h"
 #import "tweaks/private/location_sim.h"
 #import "tweaks/gravitylite.h"
+#import "tweaks/livewp.h"
+#import "tweaks/nicebarlite.h"
+#import "tweaks/nsbar.h"
 #import <CoreMotion/CoreMotion.h>
 
 #import <objc/runtime.h>
@@ -184,6 +187,50 @@ NSString * const kSettingsGravityLiteResistancePct = @"GravityLiteResistancePct"
 NSString * const kSettingsGravityLiteAngularResistancePct = @"GravityLiteAngularResistancePct";
 
 NSString * const kSettingsStageStripEnabled = @"StageStripEnabled";
+
+NSString * const kSettingsLiveWPEnabled = @"LiveWPEnabled";
+NSString * const kSettingsLiveWPVideoPath = @"LiveWPVideoPath";
+
+NSString * const kSettingsNiceBarLiteEnabled = @"NiceBarLiteEnabled";
+NSString * const kSettingsNiceBarLiteCelsius = @"NiceBarLiteCelsius";
+NSString * const kSettingsNiceBarLiteSlotKind[5] = {
+    @"NiceBarLiteSlot0Kind",
+    @"NiceBarLiteSlot1Kind",
+    @"NiceBarLiteSlot2Kind",
+    @"NiceBarLiteSlot3Kind",
+    @"NiceBarLiteSlot4Kind",
+};
+NSString * const kSettingsNiceBarLiteSlotSystemItem[5] = {
+    @"NiceBarLiteSlot0SystemItem",
+    @"NiceBarLiteSlot1SystemItem",
+    @"NiceBarLiteSlot2SystemItem",
+    @"NiceBarLiteSlot3SystemItem",
+    @"NiceBarLiteSlot4SystemItem",
+};
+NSString * const kSettingsNiceBarLiteSlotCustomText[5] = {
+    @"NiceBarLiteSlot0CustomText",
+    @"NiceBarLiteSlot1CustomText",
+    @"NiceBarLiteSlot2CustomText",
+    @"NiceBarLiteSlot3CustomText",
+    @"NiceBarLiteSlot4CustomText",
+};
+NSString * const kSettingsNiceBarLiteSlotTimeFormat[5] = {
+    @"NiceBarLiteSlot0TimeFormat",
+    @"NiceBarLiteSlot1TimeFormat",
+    @"NiceBarLiteSlot2TimeFormat",
+    @"NiceBarLiteSlot3TimeFormat",
+    @"NiceBarLiteSlot4TimeFormat",
+};
+NSString * const kSettingsNiceBarLiteSlotWeatherText[5] = {
+    @"NiceBarLiteSlot0WeatherText",
+    @"NiceBarLiteSlot1WeatherText",
+    @"NiceBarLiteSlot2WeatherText",
+    @"NiceBarLiteSlot3WeatherText",
+    @"NiceBarLiteSlot4WeatherText",
+};
+
+NSString * const kSettingsNSBarEnabled = @"NSBarEnabled";
+NSString * const kSettingsNSBarPosition = @"NSBarPosition";
 
 NSString * const kSettingsLocationSimEnabled = @"LocationSimEnabled";
 NSString * const kSettingsLocationSimLatitude = @"LocationSimLatitude";
@@ -366,6 +413,8 @@ static BOOL settings_rssi_running(void) { return g_rssi_live_running != 0; }
 static BOOL settings_axonlite_running(void) { return g_axonlite_live_running != 0; }
 static BOOL settings_typebanner_running(void) { return g_typebanner_live_running != 0; }
 static BOOL settings_themer_running(void) { return g_themer_live_running != 0 || g_themer_repair_running != 0; }
+// d1y tweaks do not have a Settings-side live loop; nothing to poll. They apply
+// once and are torn down on stop / SpringBoard respawn.
 
 static bool settings_stop_statbar_registered(BOOL springboardWillDie)
 {
@@ -413,6 +462,24 @@ static bool settings_stop_stagestrip_registered(BOOL springboardWillDie)
     return stagestrip_stop_in_session();
 }
 
+static bool settings_stop_livewp_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    return livewp_stop_in_session();
+}
+
+static bool settings_stop_nicebarlite_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    return nicebarlite_stop_in_session();
+}
+
+static bool settings_stop_nsbar_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    return nsbar_stop_in_session();
+}
+
 static void settings_each_springboard_cleanup_entry(void (^block)(const SettingsSpringBoardTweakCleanupEntry *entry))
 {
     if (!block) return;
@@ -426,6 +493,9 @@ static void settings_each_springboard_cleanup_entry(void (^block)(const Settings
         { kSettingsGravityLiteEnabled, "Gravity Lite", settings_request_gravitylite_stop, settings_stop_gravitylite_registered, gravitylite_forget_remote_state, NULL, YES, YES },
         { kSettingsThemerEnabled, "Themer", settings_request_themer_stop, settings_stop_themer_registered, themer_forget_remote_state, settings_themer_running, YES, YES },
         { kSettingsStageStripEnabled, "Stage Strip", settings_request_stagestrip_stop, settings_stop_stagestrip_registered, stagestrip_forget_remote_state, NULL, YES, YES },
+        { kSettingsLiveWPEnabled, "LiveWP", NULL, settings_stop_livewp_registered, livewp_forget_remote_state, NULL, YES, YES },
+        { kSettingsNiceBarLiteEnabled, "NiceBar Lite", NULL, settings_stop_nicebarlite_registered, nicebarlite_forget_remote_state, NULL, YES, YES },
+        { kSettingsNSBarEnabled, "NSBar", NULL, settings_stop_nsbar_registered, nsbar_forget_remote_state, NULL, YES, YES },
         { nil, "Kill All Apps", NULL, NULL, killallapps_forget_remote_state, NULL, NO, NO },
     };
     size_t count = sizeof(entries) / sizeof(entries[0]);
@@ -1786,6 +1856,45 @@ static bool settings_apply_gravitylite_from_defaults_locked(NSUserDefaults *d)
 {
     if (![d boolForKey:kSettingsGravityLiteEnabled]) return false;
     return gravitylite_apply_in_session(settings_gravitylite_config_from_defaults(d));
+}
+
+// Scoped storage for NiceBar Lite config strings. The tweak only reads the
+// const char* pointers during apply_in_session; we keep NSStrings alive here
+// for the entire function so UTF8String is guaranteed valid while the tweak
+// walks the slots.
+static NSString *g_nblCustomTextStorage[5] = {nil};
+static NSString *g_nblTimeFormatStorage[5] = {nil};
+static NSString *g_nblWeatherTextStorage[5] = {nil};
+
+static NiceBarLiteConfig settings_nicebarlite_config_from_defaults(NSUserDefaults *d)
+{
+    NiceBarLiteConfig config = {0};
+    config.celsius = [d boolForKey:kSettingsNiceBarLiteCelsius];
+    // updateMask tells the tweak which slots need a fresh fetch. The tweak
+    // already knows the slot count; we just mark every slot as "maybe-changed"
+    // since each apply call re-reads the full configuration.
+    for (NSInteger i = 0; i < NiceBarLiteSlotCount; i++) {
+        NSInteger kind = [d integerForKey:kSettingsNiceBarLiteSlotKind[i]];
+        if (kind < NiceBarLiteContentOff) kind = NiceBarLiteContentOff;
+        if (kind > NiceBarLiteContentWeather) kind = NiceBarLiteContentWeather;
+        NSInteger sysItem = [d integerForKey:kSettingsNiceBarLiteSlotSystemItem[i]];
+        if (sysItem < NiceBarLiteSystemBatteryTemp) sysItem = NiceBarLiteSystemBatteryTemp;
+        if (sysItem > NiceBarLiteSystemLunarDate) sysItem = NiceBarLiteSystemLunarDate;
+        config.slots[i].kind = (int)kind;
+        config.slots[i].systemItem = (int)sysItem;
+
+        NSString *customText = [d stringForKey:kSettingsNiceBarLiteSlotCustomText[i]] ?: @"";
+        NSString *timeFormat = [d stringForKey:kSettingsNiceBarLiteSlotTimeFormat[i]] ?: @"HH:mm";
+        NSString *weatherText = [d stringForKey:kSettingsNiceBarLiteSlotWeatherText[i]] ?: @"";
+        g_nblCustomTextStorage[i]  = customText;
+        g_nblTimeFormatStorage[i]  = timeFormat;
+        g_nblWeatherTextStorage[i] = weatherText;
+        config.slots[i].customText  = [customText UTF8String]  ?: "";
+        config.slots[i].timeFormat  = [timeFormat UTF8String]  ?: "HH:mm";
+        config.slots[i].weatherText = [weatherText UTF8String] ?: "";
+        config.updateMask |= (1u << i);
+    }
+    return config;
 }
 
 static void settings_restart_gravity_motion_if_active(const char *reason)
@@ -3594,8 +3703,88 @@ static void settings_schedule_live_apply_for_key(NSString *key)
         return;
     }
 
-    if (settings_key_is_axonlite(key)) {
-        if ([d boolForKey:kSettingsAxonLiteEnabled] && g_springboard_rc_ready) {
+    if ([key isEqualToString:kSettingsLiveWPEnabled]) {
+        if ([d boolForKey:kSettingsLiveWPEnabled] && g_springboard_rc_ready) {
+            dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                @synchronized (settings_rc_lock()) {
+                    if (settings_cleanup_in_progress() || !g_springboard_rc_ready) return;
+                    bool ok = livewp_apply_in_session();
+                    settings_mark_tweak_applied(kSettingsLiveWPEnabled,
+                                                ok && [d boolForKey:kSettingsLiveWPEnabled]);
+                    printf("[SETTINGS] live LiveWP apply result=%d\n", ok);
+                }
+                settings_notify_package_queue_changed_async();
+            });
+        } else if (![d boolForKey:kSettingsLiveWPEnabled]) {
+            settings_mark_tweak_applied(kSettingsLiveWPEnabled, NO);
+            settings_notify_package_queue_changed_async();
+            if (g_springboard_rc_ready) {
+                dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                    @synchronized (settings_rc_lock()) {
+                        if (g_springboard_rc_ready) livewp_stop_in_session();
+                    }
+                });
+            }
+        }
+        return;
+    }
+
+    if ([key isEqualToString:kSettingsNiceBarLiteEnabled]) {
+        if ([d boolForKey:kSettingsNiceBarLiteEnabled] && g_springboard_rc_ready) {
+            dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                @synchronized (settings_rc_lock()) {
+                    if (settings_cleanup_in_progress() || !g_springboard_rc_ready) return;
+                    NiceBarLiteConfig cfg = settings_nicebarlite_config_from_defaults(d);
+                    bool ok = nicebarlite_apply_in_session(cfg);
+                    settings_mark_tweak_applied(kSettingsNiceBarLiteEnabled,
+                                                ok && [d boolForKey:kSettingsNiceBarLiteEnabled]);
+                    printf("[SETTINGS] live NiceBar Lite apply result=%d\n", ok);
+                }
+                settings_notify_package_queue_changed_async();
+            });
+        } else if (![d boolForKey:kSettingsNiceBarLiteEnabled]) {
+            settings_mark_tweak_applied(kSettingsNiceBarLiteEnabled, NO);
+            settings_notify_package_queue_changed_async();
+            if (g_springboard_rc_ready) {
+                dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                    @synchronized (settings_rc_lock()) {
+                        if (g_springboard_rc_ready) nicebarlite_stop_in_session();
+                    }
+                });
+            }
+        }
+        return;
+    }
+
+    if ([key isEqualToString:kSettingsNSBarEnabled]) {
+        if ([d boolForKey:kSettingsNSBarEnabled] && g_springboard_rc_ready) {
+            dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                @synchronized (settings_rc_lock()) {
+                    if (settings_cleanup_in_progress() || !g_springboard_rc_ready) return;
+                    NSInteger pos = [d integerForKey:kSettingsNSBarPosition];
+                    if (pos < 0 || pos > NSBarPositionCenter) pos = NSBarPositionTopLeft;
+                    bool ok = nsbar_apply_in_session((NSBarPosition)pos);
+                    settings_mark_tweak_applied(kSettingsNSBarEnabled,
+                                                ok && [d boolForKey:kSettingsNSBarEnabled]);
+                    printf("[SETTINGS] live NSBar apply result=%d\n", ok);
+                }
+                settings_notify_package_queue_changed_async();
+            });
+        } else if (![d boolForKey:kSettingsNSBarEnabled]) {
+            settings_mark_tweak_applied(kSettingsNSBarEnabled, NO);
+            settings_notify_package_queue_changed_async();
+            if (g_springboard_rc_ready) {
+                dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                    @synchronized (settings_rc_lock()) {
+                        if (g_springboard_rc_ready) nsbar_stop_in_session();
+                    }
+                });
+            }
+        }
+        return;
+    }
+
+    if (settings_key_is_axonlite(key)) {        if ([d boolForKey:kSettingsAxonLiteEnabled] && g_springboard_rc_ready) {
             dispatch_async(dispatch_get_global_queue(0, 0), ^{
                 if (!settings_axonlite_can_poll_springboard()) {
                     printf("[SETTINGS] live Axon Lite apply skipped: %s\n",
@@ -3815,6 +4004,40 @@ void settings_register_defaults(void)
 
         kSettingsStageStripEnabled: @NO,
 
+        kSettingsLiveWPEnabled:  @NO,
+        kSettingsLiveWPVideoPath: @"",
+
+        kSettingsNiceBarLiteEnabled: @NO,
+        kSettingsNiceBarLiteCelsius: @NO,
+        kSettingsNiceBarLiteSlotKind[0]:        @0,
+        kSettingsNiceBarLiteSlotKind[1]:        @0,
+        kSettingsNiceBarLiteSlotKind[2]:        @0,
+        kSettingsNiceBarLiteSlotKind[3]:        @0,
+        kSettingsNiceBarLiteSlotKind[4]:        @0,
+        kSettingsNiceBarLiteSlotSystemItem[0]:  @0,
+        kSettingsNiceBarLiteSlotSystemItem[1]:  @0,
+        kSettingsNiceBarLiteSlotSystemItem[2]:  @0,
+        kSettingsNiceBarLiteSlotSystemItem[3]:  @0,
+        kSettingsNiceBarLiteSlotSystemItem[4]:  @0,
+        kSettingsNiceBarLiteSlotCustomText[0]:  @"",
+        kSettingsNiceBarLiteSlotCustomText[1]:  @"",
+        kSettingsNiceBarLiteSlotCustomText[2]:  @"",
+        kSettingsNiceBarLiteSlotCustomText[3]:  @"",
+        kSettingsNiceBarLiteSlotCustomText[4]:  @"",
+        kSettingsNiceBarLiteSlotTimeFormat[0]:  @"HH:mm",
+        kSettingsNiceBarLiteSlotTimeFormat[1]:  @"HH:mm",
+        kSettingsNiceBarLiteSlotTimeFormat[2]:  @"HH:mm",
+        kSettingsNiceBarLiteSlotTimeFormat[3]:  @"HH:mm",
+        kSettingsNiceBarLiteSlotTimeFormat[4]:  @"HH:mm",
+        kSettingsNiceBarLiteSlotWeatherText[0]: @"",
+        kSettingsNiceBarLiteSlotWeatherText[1]: @"",
+        kSettingsNiceBarLiteSlotWeatherText[2]: @"",
+        kSettingsNiceBarLiteSlotWeatherText[3]: @"",
+        kSettingsNiceBarLiteSlotWeatherText[4]: @"",
+
+        kSettingsNSBarEnabled:  @NO,
+        kSettingsNSBarPosition: @0,
+
         kSettingsLocationSimEnabled: @NO,
         kSettingsLocationSimLatitude: @(kLocationSimDefaultLatitude),
         kSettingsLocationSimLongitude: @(kLocationSimDefaultLongitude),
@@ -3909,6 +4132,9 @@ static void settings_run_actions_internal(BOOL pendingOnly)
             BOOL layoutExtrasEnabled = [d boolForKey:kSettingsLayoutExtrasEnabled];
             BOOL stageStripEnabled = [d boolForKey:kSettingsStageStripEnabled];
             BOOL gravityLiteEnabled = [d boolForKey:kSettingsGravityLiteEnabled];
+            BOOL liveWPEnabled = [d boolForKey:kSettingsLiveWPEnabled];
+            BOOL niceBarLiteEnabled = [d boolForKey:kSettingsNiceBarLiteEnabled];
+            BOOL nsBarEnabled = [d boolForKey:kSettingsNSBarEnabled];
             BOOL runSBC = settings_enabled_tweak_should_run(d, kSettingsSBCEnabled, springBoardPendingOnly);
             BOOL runDarkTweaks = settings_dark_tweaks_should_run(d, springBoardPendingOnly);
             BOOL runStatBar = settings_enabled_tweak_should_run(d, kSettingsStatBarEnabled, springBoardPendingOnly);
@@ -3919,8 +4145,11 @@ static void settings_run_actions_internal(BOOL pendingOnly)
             BOOL runLayoutExtras = settings_enabled_tweak_should_run(d, kSettingsLayoutExtrasEnabled, springBoardPendingOnly);
             BOOL runStageStrip = settings_enabled_tweak_should_run(d, kSettingsStageStripEnabled, springBoardPendingOnly);
             BOOL runGravityLite = settings_enabled_tweak_should_run(d, kSettingsGravityLiteEnabled, springBoardPendingOnly);
+            BOOL runLiveWP = settings_enabled_tweak_should_run(d, kSettingsLiveWPEnabled, springBoardPendingOnly);
+            BOOL runNiceBarLite = settings_enabled_tweak_should_run(d, kSettingsNiceBarLiteEnabled, springBoardPendingOnly);
+            BOOL runNSBar = settings_enabled_tweak_should_run(d, kSettingsNSBarEnabled, springBoardPendingOnly);
             BOOL cleanupDisabledSpringBoardTweaks = settings_disabled_applied_springboard_cleanup_needed(d);
-            BOOL needsSpringBoardWork = runSBC || runDarkTweaks || runStatBar || runRSSI || runAxonLite || runGravityLite || runLayoutExtras || runTypeBanner || runThemer || runStageStrip || cleanupDisabledSpringBoardTweaks;
+            BOOL needsSpringBoardWork = runSBC || runDarkTweaks || runStatBar || runRSSI || runAxonLite || runGravityLite || runLayoutExtras || runTypeBanner || runThemer || runStageStrip || runLiveWP || runNiceBarLite || runNSBar || cleanupDisabledSpringBoardTweaks;
             BOOL runSandboxEscape = [d boolForKey:kSettingsRunSandboxEscape] && (!pendingOnly || needsSpringBoardWork);
             // TypeBanner prewarms its hidden SpringBoard window during Apply
             // and reuses the open SpringBoard session for text-only updates.
@@ -3941,6 +4170,9 @@ static void settings_run_actions_internal(BOOL pendingOnly)
             if (runGravityLite) total++;
             if (runTypeBanner) total++;
             if (runStageStrip) total++;
+            if (runLiveWP) total++;
+            if (runNiceBarLite) total++;
+            if (runNSBar) total++;
             if (cleanupDisabledSpringBoardTweaks) total++;
             NSUInteger step = 0;
 
@@ -3957,6 +4189,9 @@ static void settings_run_actions_internal(BOOL pendingOnly)
             if (runThemer) [enabledTweaks addObject:@"themer"];
             if (runTypeBanner) [enabledTweaks addObject:@"typebanner"];
             if (runStageStrip) [enabledTweaks addObject:@"stagestrip"];
+            if (runLiveWP) [enabledTweaks addObject:@"livewp"];
+            if (runNiceBarLite) [enabledTweaks addObject:@"nicebarlite"];
+            if (runNSBar) [enabledTweaks addObject:@"nsbar"];
             if (cleanupDisabledSpringBoardTweaks) [enabledTweaks addObject:@"cleanup"];
             if (forceSpringBoardRefresh) [enabledTweaks addObject:@"springboard-refresh"];
             log_user("[PLAN] %lu stages: %s\n",
@@ -4197,6 +4432,54 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         // from a prior Run. No-op when the strip was never up.
                         stagestrip_stop_in_session();
                     }
+
+                    if (runLiveWP) {
+                        settings_progress(&step, total, "Starting Live Wallpaper video overlay");
+                        // livewp applies whatever path the user picked (or stops
+                        // gracefully when the path is empty). The selection UI
+                        // lives in SettingsViewController (document picker).
+                        bool ok = livewp_apply_in_session();
+                        settings_mark_tweak_applied(kSettingsLiveWPEnabled,
+                                                    ok && [d boolForKey:kSettingsLiveWPEnabled]);
+                        printf("[SETTINGS] LiveWP result=%d\n", ok);
+                        log_user("%s Live Wallpaper %s.\n",
+                                 ok ? "[OK]" : "[WARN]",
+                                 ok ? "video overlay attached" : "did not start cleanly (set a video path)");
+                        cyanide_upload_log_milestone(ok ? @"livewp-initial-applied" : @"livewp-initial-failed");
+                    } else if (!liveWPEnabled) {
+                        livewp_stop_in_session();
+                    }
+
+                    if (runNiceBarLite) {
+                        settings_progress(&step, total, "Painting NiceBar Lite status slots");
+                        NiceBarLiteConfig nblConfig = settings_nicebarlite_config_from_defaults(d);
+                        bool ok = nicebarlite_apply_in_session(nblConfig);
+                        settings_mark_tweak_applied(kSettingsNiceBarLiteEnabled,
+                                                    ok && [d boolForKey:kSettingsNiceBarLiteEnabled]);
+                        printf("[SETTINGS] NiceBar Lite result=%d\n", ok);
+                        log_user("%s NiceBar Lite %s.\n",
+                                 ok ? "[OK]" : "[WARN]",
+                                 ok ? "5 status-bar slots installed" : "did not start cleanly");
+                        cyanide_upload_log_milestone(ok ? @"nicebarlite-initial-applied" : @"nicebarlite-initial-failed");
+                    } else if (!niceBarLiteEnabled) {
+                        nicebarlite_stop_in_session();
+                    }
+
+                    if (runNSBar) {
+                        settings_progress(&step, total, "Starting NSBar network-speed overlay");
+                        NSInteger pos = [d integerForKey:kSettingsNSBarPosition];
+                        if (pos < 0 || pos > NSBarPositionCenter) pos = NSBarPositionTopLeft;
+                        bool ok = nsbar_apply_in_session((NSBarPosition)pos);
+                        settings_mark_tweak_applied(kSettingsNSBarEnabled,
+                                                    ok && [d boolForKey:kSettingsNSBarEnabled]);
+                        printf("[SETTINGS] NSBar result=%d\n", ok);
+                        log_user("%s NSBar %s.\n",
+                                 ok ? "[OK]" : "[WARN]",
+                                 ok ? "network-speed label attached" : "did not start cleanly");
+                        cyanide_upload_log_milestone(ok ? @"nsbar-initial-applied" : @"nsbar-initial-failed");
+                    } else if (!nsBarEnabled) {
+                        nsbar_stop_in_session();
+                    }
                 }
 
                 if (runStatBar) {
@@ -4315,6 +4598,9 @@ typedef NS_ENUM(NSInteger, SettingsSection) {
     SectionThemer,
     SectionLocationSim,
     SectionGravityLite,
+    SectionLiveWP,
+    SectionNiceBarLite,
+    SectionNSBar,
     SectionCount,
 };
 
@@ -4384,6 +4670,11 @@ static NSString *settings_pretty_date_for_iso(NSString *iso)
 @property (nonatomic, assign) NSInteger underlyingSection;
 @property (nonatomic, copy)   NSString *bundleTitle;
 @property (nonatomic, assign) BOOL changelogExpanded;
+// Tracks what the currently-presented UIDocumentPickerViewController is being
+// used for. The shared documentPicker:didPickDocumentsAtURLs: dispatcher
+// branches on this to route the picked file to the right tweak. Reset to nil
+// after every picker session.
+@property (nonatomic, copy)   NSString *activeDocumentPickerMode;
 @end
 
 // Singleton delegate so MFMailCompose's host VC doesn't need to conform. Lives
@@ -5191,6 +5482,108 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     ];
 }
 
+#pragma mark - LiveWP rows (d1y)
+
+- (NSArray<NSDictionary *> *)livewpRows
+{
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    NSString *current = [d stringForKey:kSettingsLiveWPVideoPath] ?: @"";
+    NSString *subtitle = current.length
+        ? [NSString stringWithFormat:@"%@", current.lastPathComponent]
+        : @"No video selected";
+    return @[
+        @{ @"kind": @"info",
+           @"title": @"Video",
+           @"subtitle": subtitle },
+        @{ @"kind": @"button",
+           @"title": @"Pick Video…",
+           @"action": @"livewp-pick" },
+        @{ @"kind": @"button",
+           @"title": @"Apply Wallpaper",
+           @"action": @"livewp-apply" },
+        @{ @"kind": @"button",
+           @"title": @"Stop Wallpaper",
+           @"subtitle": @"Removes the AVPlayerLayer from SpringBoard windows.",
+           @"action": @"livewp-stop",
+           @"destructive": @YES },
+    ];
+}
+
+#pragma mark - NiceBar Lite rows (d1y)
+
+- (NSArray<NSDictionary *> *)nicebarliteRows
+{
+    NSArray<NSString *> *titles = @[
+        @"Slot 1 (Top-Left)", @"Slot 2 (Top-Right)",
+        @"Slot 3 (Bottom-Left)", @"Slot 4 (Bottom-Right)",
+        @"Slot 5 (Bottom-Center)",
+    ];
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
+    [rows addObject:@{ @"kind": @"toggle",
+                       @"key": kSettingsNiceBarLiteCelsius,
+                       @"title": @"Celsius (battery temp)" }];
+    NSArray<NSString *> *kindTitles = @[@"Off", @"Custom Text", @"System", @"Time Format", @"Weather"];
+    for (NSInteger i = 0; i < 5; i++) {
+        [rows addObject:@{ @"kind": @"segment",
+                           @"key": kSettingsNiceBarLiteSlotKind[i],
+                           @"title": titles[i],
+                           @"options": kindTitles,
+                           @"default": @0 }];
+        [rows addObject:@{ @"kind": @"segment",
+                           @"key": kSettingsNiceBarLiteSlotSystemItem[i],
+                           @"title": [NSString stringWithFormat:@"  → System Item %ld", (long)(i+1)],
+                           @"options": @[@"Battery Temp", @"Free RAM", @"Battery %", @"Net Speed", @"Uptime", @"Date", @"Lunar Date"],
+                           @"default": @0 }];
+        [rows addObject:@{ @"kind": @"text",
+                           @"key": kSettingsNiceBarLiteSlotCustomText[i],
+                           @"title": [NSString stringWithFormat:@"  → Custom Text %ld", (long)(i+1)],
+                           @"placeholder": @"Text to show" }];
+        [rows addObject:@{ @"kind": @"text",
+                           @"key": kSettingsNiceBarLiteSlotTimeFormat[i],
+                           @"title": [NSString stringWithFormat:@"  → Time Format %ld", (long)(i+1)],
+                           @"placeholder": @"HH:mm" }];
+        [rows addObject:@{ @"kind": @"text",
+                           @"key": kSettingsNiceBarLiteSlotWeatherText[i],
+                           @"title": [NSString stringWithFormat:@"  → Weather Text %ld", (long)(i+1)],
+                           @"placeholder": @"e.g. 21°C ☀" }];
+    }
+    [rows addObject:@{ @"kind": @"button",
+                       @"title": @"Reapply NiceBar Lite",
+                       @"subtitle": @"Push the current slot configuration to SpringBoard.",
+                       @"action": @"nicebarlite-apply" }];
+    [rows addObject:@{ @"kind": @"button",
+                       @"title": @"Stop NiceBar Lite",
+                       @"action": @"nicebarlite-stop",
+                       @"destructive": @YES }];
+    return rows;
+}
+
+#pragma mark - NSBar rows (d1y)
+
+- (NSArray<NSDictionary *> *)nsbarRows
+{
+    NSArray<NSString *> *positions = @[
+        @"Top-Left", @"Bottom-Left", @"Top-Right", @"Bottom-Right", @"Center",
+    ];
+    return @[
+        @{ @"kind": @"segment",
+           @"key": kSettingsNSBarPosition,
+           @"title": @"Position",
+           @"options": positions,
+           @"default": @0 },
+        @{ @"kind": @"info",
+           @"title": @"Speed",
+           @"subtitle": @"Real-time ↓/↑ network throughput in KB/s." },
+        @{ @"kind": @"button",
+           @"title": @"Reapply NSBar",
+           @"action": @"nsbar-apply" },
+        @{ @"kind": @"button",
+           @"title": @"Stop NSBar",
+           @"action": @"nsbar-stop",
+           @"destructive": @YES },
+    ];
+}
+
 - (NSArray<NSDictionary *> *)themerRows
 {
     BOOL hasSelection = settings_themer_has_selected_theme();
@@ -5293,6 +5686,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case SectionTypeBanner: return self.typebannerRows;
         case SectionGravityLite: return self.gravityLiteRows;
         case SectionLocationSim: return self.locationSimRows;
+        case SectionLiveWP:      return self.livewpRows;
+        case SectionNiceBarLite: return self.nicebarliteRows;
+        case SectionNSBar:       return self.nsbarRows;
         default: return @[];
     }
 }
@@ -5897,6 +6293,189 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     [self presentViewController:hint animated:YES completion:nil];
 }
 
+#pragma mark - LiveWP (d1y) helpers
+
+- (void)presentLiveWPVideoPicker
+{
+    UTType *movieType = [UTType typeWithIdentifier:@"public.movie"];
+    if (!movieType) movieType = UTTypeMovie;
+    UIDocumentPickerViewController *picker =
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[movieType ?: UTTypeMovie]];
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    self.activeDocumentPickerMode = @"livewp";
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+// Imports a security-scoped movie URL into the app's Documents/LiveWP/ folder
+// so the path stays valid for the lifetime of the install. Saves either a
+// relative path (when the file lives inside Documents) or an absolute path.
+- (void)importLiveWPVideoAtURL:(NSURL *)url
+{
+    BOOL scoped = [url startAccessingSecurityScopedResource];
+    NSError *err = nil;
+    NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *targetDir = [docs stringByAppendingPathComponent:@"LiveWP"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:targetDir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:&err];
+    NSString *dst = [targetDir stringByAppendingPathComponent:url.lastPathComponent];
+    // Remove any previous copy so we don't leak old files forever.
+    [[NSFileManager defaultManager] removeItemAtPath:dst error:nil];
+    BOOL copied = [[NSFileManager defaultManager] copyItemAtURL:url
+                                                          toURL:[NSURL fileURLWithPath:dst]
+                                                          error:&err];
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    NSString *saved = copied ? dst : nil;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!copied) {
+            UIAlertController *ac = [UIAlertController
+                alertControllerWithTitle:@"LiveWP Import Failed"
+                                 message:err.localizedDescription ?: @"Could not copy the selected video."
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [ac addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:ac animated:YES completion:nil];
+            return;
+        }
+        // Store a path the tweak can read: absolute if it lived outside
+        // Documents (typical for picker picks), relative otherwise. The tweak
+        // checks for an absolute prefix and falls back to Documents/ otherwise.
+        [[NSUserDefaults standardUserDefaults] setObject:saved forKey:kSettingsLiveWPVideoPath];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        // The detail-mode table is a single section at index 0; reload it so
+        // the "Video" info row refreshes its subtitle.
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0]
+                      withRowAnimation:UITableViewRowAnimationNone];
+        // If the toggle is already on, push the new file into SpringBoard.
+        if ([[NSUserDefaults standardUserDefaults] boolForKey:kSettingsLiveWPEnabled]) {
+            [self applyLiveWPNow];
+        }
+    });
+}
+
+- (void)applyLiveWPNow
+{
+    if (!g_springboard_rc_ready) {
+        [self runTweaksRequested:@"Apply Live Wallpaper now? Run kexploit first."];
+        return;
+    }
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        @synchronized (settings_rc_lock()) {
+            if (!g_springboard_rc_ready) return;
+            NSString *path = [[NSUserDefaults standardUserDefaults] stringForKey:kSettingsLiveWPVideoPath];
+            bool ok = path.length
+                ? livewp_swap_video_in_session(path) || livewp_apply_in_session()
+                : livewp_apply_in_session();
+            settings_mark_tweak_applied(kSettingsLiveWPEnabled,
+                                        ok && [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsLiveWPEnabled]);
+            printf("[SETTINGS] LiveWP manual apply result=%d\n", ok);
+        }
+        settings_notify_package_queue_changed_async();
+    });
+}
+
+- (void)stopLiveWPNow
+{
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        @synchronized (settings_rc_lock()) {
+            if (g_springboard_rc_ready) livewp_stop_in_session();
+        }
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kSettingsLiveWPEnabled];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        settings_mark_tweak_applied(kSettingsLiveWPEnabled, NO);
+        settings_notify_package_queue_changed_async();
+    });
+}
+
+#pragma mark - NiceBar Lite (d1y) helpers
+
+- (void)applyNiceBarLiteNow
+{
+    if (!g_springboard_rc_ready) {
+        [self runTweaksRequested:@"Apply NiceBar Lite now? Run kexploit first."];
+        return;
+    }
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        @synchronized (settings_rc_lock()) {
+            if (!g_springboard_rc_ready) return;
+            NiceBarLiteConfig cfg = settings_nicebarlite_config_from_defaults(d);
+            bool ok = nicebarlite_apply_in_session(cfg);
+            settings_mark_tweak_applied(kSettingsNiceBarLiteEnabled,
+                                        ok && [d boolForKey:kSettingsNiceBarLiteEnabled]);
+            printf("[SETTINGS] NiceBar Lite manual apply result=%d\n", ok);
+        }
+        settings_notify_package_queue_changed_async();
+    });
+}
+
+- (void)stopNiceBarLiteNow
+{
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        @synchronized (settings_rc_lock()) {
+            if (g_springboard_rc_ready) nicebarlite_stop_in_session();
+        }
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kSettingsNiceBarLiteEnabled];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        settings_mark_tweak_applied(kSettingsNiceBarLiteEnabled, NO);
+        settings_notify_package_queue_changed_async();
+    });
+}
+
+#pragma mark - NSBar (d1y) helpers
+
+- (void)applyNSBarNow
+{
+    if (!g_springboard_rc_ready) {
+        [self runTweaksRequested:@"Apply NSBar now? Run kexploit first."];
+        return;
+    }
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSInteger pos = [d integerForKey:kSettingsNSBarPosition];
+    if (pos < 0 || pos > NSBarPositionCenter) pos = NSBarPositionTopLeft;
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        @synchronized (settings_rc_lock()) {
+            if (!g_springboard_rc_ready) return;
+            bool ok = nsbar_apply_in_session((NSBarPosition)pos);
+            settings_mark_tweak_applied(kSettingsNSBarEnabled,
+                                        ok && [d boolForKey:kSettingsNSBarEnabled]);
+            printf("[SETTINGS] NSBar manual apply result=%d\n", ok);
+        }
+        settings_notify_package_queue_changed_async();
+    });
+}
+
+- (void)stopNSBarNow
+{
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        @synchronized (settings_rc_lock()) {
+            if (g_springboard_rc_ready) nsbar_stop_in_session();
+        }
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kSettingsNSBarEnabled];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        settings_mark_tweak_applied(kSettingsNSBarEnabled, NO);
+        settings_notify_package_queue_changed_async();
+    });
+}
+
+// Generic helper shown when a tweak action requires kexploit to have run first.
+// Routes through settings_run_actions so the user gets the normal Run UX.
+- (void)runTweaksRequested:(NSString *)message
+{
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"Run Tweaks First"
+                         message:message
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Run" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        (void)a;
+        settings_run_actions();
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
 - (BOOL)importThemerFolderAtURL:(NSURL *)url error:(NSError **)error
 {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -5977,7 +6556,14 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
 {
     (void)controller;
     NSURL *url = urls.firstObject;
+    NSString *mode = self.activeDocumentPickerMode;
+    self.activeDocumentPickerMode = nil;
     if (!url) return;
+
+    if ([mode isEqualToString:@"livewp"]) {
+        [self importLiveWPVideoAtURL:url];
+        return;
+    }
 
     BOOL scoped = [url startAccessingSecurityScopedResource];
     BOOL isDir = NO;
@@ -8136,6 +8722,41 @@ void cyanide_present_contact(UIViewController *host)
             [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0]
                           withRowAnimation:UITableViewRowAnimationNone];
         }
+    }
+
+    if (indexPath.section == SectionLiveWP) {
+        NSDictionary *row = [self rowsForSection:indexPath.section][indexPath.row];
+        NSString *action = row[@"action"];
+        if ([action isEqualToString:@"livewp-pick"]) {
+            [self presentLiveWPVideoPicker];
+        } else if ([action isEqualToString:@"livewp-apply"]) {
+            [self applyLiveWPNow];
+        } else if ([action isEqualToString:@"livewp-stop"]) {
+            [self stopLiveWPNow];
+        }
+        return;
+    }
+
+    if (indexPath.section == SectionNiceBarLite) {
+        NSDictionary *row = [self rowsForSection:indexPath.section][indexPath.row];
+        NSString *action = row[@"action"];
+        if ([action isEqualToString:@"nicebarlite-apply"]) {
+            [self applyNiceBarLiteNow];
+        } else if ([action isEqualToString:@"nicebarlite-stop"]) {
+            [self stopNiceBarLiteNow];
+        }
+        return;
+    }
+
+    if (indexPath.section == SectionNSBar) {
+        NSDictionary *row = [self rowsForSection:indexPath.section][indexPath.row];
+        NSString *action = row[@"action"];
+        if ([action isEqualToString:@"nsbar-apply"]) {
+            [self applyNSBarNow];
+        } else if ([action isEqualToString:@"nsbar-stop"]) {
+            [self stopNSBarNow];
+        }
+        return;
     }
 }
 
