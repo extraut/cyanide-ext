@@ -324,31 +324,20 @@ static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool 
     if (curSuper != winLayer) {
         if (r_is_objc_ptr(curSuper))
             r_msg2_main(layer, "removeFromSuperlayer", 0, 0, 0, 0);
-        // To make the wallpaper sit UNDER the iOS 26 content layers
-        // (SBIconView, SBLockScreenView, status bar), we use
-        // -insertSublayer:below: relative to the FIRST existing sublayer
-        // of the host window. That is the stock background wallpaper
-        // layer in SBHomeScreenWindow / SBCoverSheetWindow. This puts us
-        // beneath everything the user actually sees, including the
-        // stock wallpaper — and because the user-picked video is opaque
-        // and aspect-fill, it covers the stock wallpaper completely.
-        // -atIndex:0 was wrong: in iOS 26 the wallpaper layer is at
-        // index 0 and we were placed on top of it, occluding the video
-        // during lockscreen pull-down. -insertSublayer:below: is the
-        // safe primitive — no atIndex, no zPosition, no autolayout
-        // constraint invalidation.
-        uint64_t firstSub = r_msg2_main(winLayer, "sublayers", 0, 0, 0, 0);
-        if (r_is_objc_ptr(firstSub)) {
-            uint64_t first = r_msg2_main(firstSub, "firstObject", 0, 0, 0, 0);
-            if (r_is_objc_ptr(first)) {
-                r_msg2_main(winLayer, "insertSublayer:below:",
-                            layer, first, 0, 0);
-            } else {
-                r_msg2_main(winLayer, "addSublayer:", layer, 0, 0, 0);
-            }
-        } else {
-            r_msg2_main(winLayer, "addSublayer:", layer, 0, 0, 0);
-        }
+        // Insert at index 1. In iOS 26 the stock wallpaper layer is at
+        // index 0 of SBHomeScreenWindow / SBCoverSheetWindow, and content
+        // layers (SBIconView, SBLockScreenView, status bar overlays) are
+        // appended at higher indices. atIndex:1 places us above the
+        // wallpaper and below the content — exactly the wallpaper
+        // position. We do NOT use -insertSublayer:below: relative to
+        // sublayers.firstObject, because on iOS 26 the firstObject in
+        // SBCoverSheetWindow is a status-bar-adjacent layer and inserting
+        // a CALayer below it triggers a UIView autolayout recompute in
+        // a sensitive host hierarchy that asserts and crashes
+        // SpringBoard. atIndex:1 is the safe primitive — no sibling
+        // lookup, no autolayout invalidation, no zPosition mutation.
+        r_msg2_main(winLayer, "insertSublayer:atIndex:",
+                    layer, (uint64_t)1, 0, 0);
         if (movedOut) *movedOut = true;
     }
     return true;
