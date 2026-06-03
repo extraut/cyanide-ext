@@ -434,6 +434,10 @@ static const NSInteger kSecNSBar            = 19;
     for (NSString *cat in all) {
         if (![order containsObject:cat]) [order addObject:cat];
     }
+    // Temporary diagnostic so we can see in the Log tab which categories the
+    // Installer actually received. Strip once the d1y Tweaks section renders.
+    printf("[PackageCatalog] categoriesInOrder -> %s\n",
+           [[order componentsJoinedByString:@" | "] UTF8String]);
     return order;
 }
 
