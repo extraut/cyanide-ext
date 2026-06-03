@@ -271,7 +271,6 @@ static bool livewp_create_player(NSString *videoPath)
     g_livewp_player_item = playerItem;
     g_livewp_home_layer = homeLayer;
     g_livewp_lock_layer = lockLayer;
-    g_livewp_looper = looper;
     log_user("[LIVEWP] player OK (2 layers)\n");
     return true;
 }
