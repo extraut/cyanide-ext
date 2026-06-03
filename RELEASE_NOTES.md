@@ -19,6 +19,10 @@ Avoid vague bullets like "Update settings", "Change project files", or
 
 ## Released
 
+### v1.2.2 - 2026-06-03
+
+- [x] Fixed kernel panic on A16+/M-series iPads by guarding the t1sz_boot override so the PAC mask uses the correct value.
+
 ### v1.2.0 - 2026-06-03
 
 - [x] Added Gravity Lite with home screen and dock icon physics, tilt control, widget support, and iOS 18/26 compatibility.
