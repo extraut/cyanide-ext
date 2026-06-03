@@ -152,6 +152,8 @@ static uint64_t picture_overlay_create_window(uint64_t scene, uint64_t overlayId
     }
 
     printf("[PICTURE] created window=0x%llx for id=%llu level=%.1f\n", win, overlayId, windowLevel);
+    printf("[PICTURE-DIAG] create_window OK win=0x%llx scene=0x%llx id=%llu level=%.1f\n",
+           win, scene, overlayId, windowLevel);
 
     // Set window level (passed by caller; clamped to 1–9999)
     r_msg2_main(win, "setWindowLevel:", *(uint64_t *)&windowLevel, 0, 0, 0);
@@ -285,6 +287,8 @@ static uint64_t picture_overlay_load_image(const char *imagePath)
 
     NSData *imageData = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:imagePath]];
 
+    printf("[PICTURE-DIAG] load_image local data=%p len=%lu for path=%s\n",
+           (void *)imageData, (unsigned long)(imageData ? imageData.length : 0), imagePath);
     if (!imageData || imageData.length == 0) return 0;
 
     uint64_t NSData_class = r_class("NSData");
@@ -333,8 +337,13 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
                                       int scalePct, int alphaPct,
                                       int zIndex)
 {
+    printf("[PICTURE-DIAG] apply id=%llu enabled=%d path=%s off=(%d,%d) scale=%d alpha=%d zIndex=%d\n",
+           overlayId, (int)enabled, imagePath ? imagePath : "(null)",
+           offsetX, offsetY, scalePct, alphaPct, zIndex);
     if (!enabled) {
-        return picture_overlay_stop_in_session(overlayId);
+        bool r = picture_overlay_stop_in_session(overlayId);
+        printf("[PICTURE-DIAG] stop_in_session returned %d for id=%llu\n", r, overlayId);
+        return r;
     }
 
     if (!imagePath || !*imagePath) {
@@ -347,9 +356,12 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
     if (overlayId < 32) {
         gPictureOverlayWindowLevels[overlayId] = windowLevel;
     }
+    printf("[PICTURE-DIAG] windowLevel=%.1f for id=%llu\n", windowLevel, overlayId);
 
     // Get or create overlay window
     uint64_t window = picture_overlay_get_window(overlayId);
+    printf("[PICTURE-DIAG] get_window returned 0x%llx (scene=0x%llx) for id=%llu\n",
+           window, gPictureOverlayScene, overlayId);
     if (!r_is_objc_ptr(window)) {
         printf("[PICTURE] FAIL: could not get overlay window for id=%llu (scene=0x%llx)\n",
                overlayId, gPictureOverlayScene);
@@ -358,6 +370,8 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
 
     // Load image
     uint64_t image = picture_overlay_load_image(imagePath);
+    printf("[PICTURE-DIAG] load_image returned 0x%llx for id=%llu path=%s\n",
+           image, overlayId, imagePath);
     if (!r_is_objc_ptr(image)) {
         printf("[PICTURE] failed to load image for id=%llu: %s\n", overlayId, imagePath);
         return false;
@@ -388,7 +402,9 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
         // Update frame
         struct { double x, y, w, h; } bounds = {0};
         r_msg2_main_struct_ret(window, "bounds", &bounds, sizeof(bounds),
-                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+                               NULL, 0, NULL, 0, NULL, 0);
+        printf("[PICTURE-DIAG] update-existing bounds=(%.0f,%.0f,%.0f,%.0f) for id=%llu\n",
+               bounds.x, bounds.y, bounds.w, bounds.h, overlayId);
 
         CGFloat scaleFactor = (CGFloat)scalePct / 100.0;
         CGFloat scaledW = bounds.w * 0.3 * scaleFactor;  // 30% of screen as base
@@ -441,6 +457,8 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
     struct { double x, y, w, h; } bounds = {0};
     r_msg2_main_struct_ret(window, "bounds", &bounds, sizeof(bounds),
                            NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+    printf("[PICTURE-DIAG] create-new bounds=(%.0f,%.0f,%.0f,%.0f) for id=%llu\n",
+           bounds.x, bounds.y, bounds.w, bounds.h, overlayId);
 
     CGFloat scaleFactor = (CGFloat)scalePct / 100.0;
     CGFloat scaledW = bounds.w * 0.3 * scaleFactor;
@@ -458,6 +476,8 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
 
     printf("[PICTURE] created overlay id=%llu tag=0x%llx level=%.0f at (%.0f, %.0f) size (%.0f, %.0f)\n",
            overlayId, tag, windowLevel, posX, posY, scaledW, scaledH);
+    printf("[PICTURE-DIAG] apply_in_session OK id=%llu frame=(%.0f,%.0f,%.0f,%.0f)\n",
+           overlayId, posX, posY, scaledW, scaledH);
 
     return true;
 }
