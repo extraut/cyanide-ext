@@ -288,7 +288,7 @@ static uint64_t picture_overlay_load_image(const char *imagePath)
     NSData *imageData = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:imagePath]];
 
     printf("[PICTURE-DIAG] load_image local data=%p len=%lu for path=%s\n",
-           (void *)imageData, (unsigned long)(imageData ? imageData.length : 0), imagePath);
+           (void *)(__bridge uintptr_t)imageData, (unsigned long)(imageData ? imageData.length : 0), imagePath);
     if (!imageData || imageData.length == 0) return 0;
 
     uint64_t NSData_class = r_class("NSData");
@@ -402,7 +402,7 @@ bool picture_overlay_apply_in_session(uint64_t overlayId, BOOL enabled, const ch
         // Update frame
         struct { double x, y, w, h; } bounds = {0};
         r_msg2_main_struct_ret(window, "bounds", &bounds, sizeof(bounds),
-                               NULL, 0, NULL, 0, NULL, 0);
+                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
         printf("[PICTURE-DIAG] update-existing bounds=(%.0f,%.0f,%.0f,%.0f) for id=%llu\n",
                bounds.x, bounds.y, bounds.w, bounds.h, overlayId);
 
