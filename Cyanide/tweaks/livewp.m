@@ -201,15 +201,20 @@ bool livewp_swap_video_in_session(NSString *videoPath)
         log_user("[LIVEWP] swap: AVPlayerLooper class missing\n");
         return false;
     }
-    // -[AVPlayerLooper initWithPlayer:templateItem:]:
-    //   player       = g_livewp_player (AVQueuePlayer)
-    //   templateItem = newItem
-    // Looper takes ownership semantics: it holds strong refs to both, and
-    // re-enqueues new copies of templateItem onto the queue automatically.
-    uint64_t newLooper = r_msg2_main(looperClass, "initWithPlayer:templateItem:",
+    // -[AVPlayerLooper initWithPlayer:templateItem:] is an instance
+    // initializer. Two-step alloc/init: +alloc returns a +1 retained
+    // instance, then -init... fills it in. The looper retains both the
+    // player and the template item internally.
+    uint64_t allocated = r_msg2_main(looperClass, "alloc", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(allocated)) {
+        log_user("[LIVEWP] swap: AVPlayerLooper alloc failed\n");
+        return false;
+    }
+    uint64_t newLooper = r_msg2_main(allocated, "initWithPlayer:templateItem:",
                                     g_livewp_player, newItem, 0, 0);
     if (!r_is_objc_ptr(newLooper)) {
         log_user("[LIVEWP] swap: failed to init AVPlayerLooper\n");
+        r_msg2(allocated, "release", 0, 0, 0, 0);
         return false;
     }
 
@@ -300,13 +305,22 @@ static bool livewp_create_player(NSString *videoPath)
     if (r_class("AVQueuePlayer") == playerClass) {
         uint64_t looperClass = r_class("AVPlayerLooper");
         if (r_is_objc_ptr(looperClass)) {
-            // -[AVPlayerLooper initWithPlayer:templateItem:].
-            // The looper will retain both the player and the template item
-            // internally, so we don't need to retain them again here.
-            looper = r_msg2_main(looperClass, "initWithPlayer:templateItem:",
-                                player, playerItem, 0, 0);
-            if (!r_is_objc_ptr(looper)) {
-                log_user("[LIVEWP] AVPlayerLooper init failed\n");
+            // -[AVPlayerLooper initWithPlayer:templateItem:] is an INSTANCE
+            // initializer, not a class one. Calling it directly on the class
+            // object returns 0 (init needs a real zero'd instance to fill
+            // in). Two-step: +alloc returns a +1 retained instance, then
+            // -init... sets it up. The looper retains both the player and
+            // the template item internally.
+            uint64_t allocated = r_msg2_main(looperClass, "alloc", 0, 0, 0, 0);
+            if (!r_is_objc_ptr(allocated)) {
+                log_user("[LIVEWP] AVPlayerLooper alloc failed\n");
+            } else {
+                looper = r_msg2_main(allocated, "initWithPlayer:templateItem:",
+                                    player, playerItem, 0, 0);
+                if (!r_is_objc_ptr(looper)) {
+                    log_user("[LIVEWP] AVPlayerLooper init failed\n");
+                    r_msg2(allocated, "release", 0, 0, 0, 0);
+                }
             }
         } else {
             log_user("[LIVEWP] AVPlayerLooper class not found\n");
