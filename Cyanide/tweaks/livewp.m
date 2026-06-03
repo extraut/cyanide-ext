@@ -16,6 +16,7 @@
 #import <UIKit/UIKit.h>
 #import <stdio.h>
 #import <unistd.h>
+#import <dispatch/dispatch.h>
 
 // ============================================================================
 // MARK: - Global State
@@ -29,6 +30,8 @@ static uint64_t g_livewp_looper = 0;           // AVPlayerLooper 实例
 static uint64_t g_livewp_home_window = 0;
 static uint64_t g_livewp_lock_window = 0;
 static bool g_livewp_configured = false;
+static dispatch_source_t g_livewp_timer = NULL; // poll-based loop driver
+static int g_livewp_tick = 0;                  // throttle layer reattach
 
 typedef struct { double x, y, w, h; } LiveWPRect;
 
@@ -46,6 +49,8 @@ NSString * const kLiveWPVideoPath = @"LiveWPVideoPath";
 static bool livewp_create_player(NSString *videoPath);
 static bool livewp_attach_and_play(void);
 static void livewp_cleanup(void);
+static void livewp_timer_start(void);
+static void livewp_timer_stop(void);
 
 // ============================================================================
 // MARK: - Public Interface
@@ -81,6 +86,7 @@ bool livewp_apply_in_session(void)
     if (!livewp_attach_and_play()) { livewp_cleanup(); return false; }
 
     g_livewp_configured = true;
+    livewp_timer_start();
     log_user("[LIVEWP] OK: playing.\n");
     return true;
 }
@@ -97,6 +103,7 @@ bool livewp_stop_in_session(void)
     if (r_is_objc_ptr(g_livewp_lock_layer))
         r_msg2_main(g_livewp_lock_layer, "removeFromSuperlayer", 0, 0, 0, 0);
 
+    livewp_timer_stop();
     livewp_cleanup();
     g_livewp_configured = false;
     log_user("[LIVEWP] stopped.\n");
@@ -141,35 +148,16 @@ bool livewp_resume_in_session(void)
 bool livewp_repair_in_session(void)
 {
     if (!g_livewp_configured) return false;
+    // The GCD timer (livewp_timer_fire) does the heavy lifting now: it
+    // rewinds at end-of-stream and re-parents layers every ~2s. This
+    // entry point stays as a manual escape hatch — call it from a
+    // screen-on darwin-notify observer to force a re-attach right now
+    // without waiting for the next tick.
     if (!r_is_objc_ptr(g_livewp_player)) {
-        // Player pointer went stale (SpringBoard respawn). Rebuild from
-        // scratch — both AVPlayer and AVPlayerLooper are recreated.
         NSString *path = livewp_absolute_path();
         if (!path.length) return false;
         if (!livewp_create_player(path)) return false;
         return livewp_attach_and_play();
-    }
-
-    // Manual-loop fallback. When AVPlayerLooper failed to init at create
-    // time we leave g_livewp_looper == 0 and the player in
-    // actionAtItemEnd=Pause mode. On every repair tick we rewind to zero
-    // once the current item has reached end-of-stream, then re-attach
-    // layers and play.
-    if (!r_is_objc_ptr(g_livewp_looper) && r_is_objc_ptr(g_livewp_player_item)) {
-        // Compare as seconds (value/timescale) — timescales differ between
-        // audio and video tracks, raw numerator comparison is wrong.
-        struct { long long v; long long ts; } dur = {0, 0}, cur = {0, 0};
-        r_msg2_main_struct_ret(g_livewp_player_item, "duration", &dur, sizeof(dur),
-                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
-        r_msg2_main_struct_ret(g_livewp_player, "currentTime", &cur, sizeof(cur),
-                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
-        double durSec = (dur.ts > 0) ? (double)dur.v / (double)dur.ts : 0.0;
-        double curSec = (cur.ts > 0) ? (double)cur.v / (double)cur.ts : 0.0;
-        if (durSec > 0.0 && curSec >= durSec) {
-            struct { long long v; long long ts; } zero = {0, 0};
-            r_msg2_main_raw(g_livewp_player, "seekToTime:",
-                            &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
-        }
     }
     return livewp_attach_and_play();
 }
@@ -234,12 +222,6 @@ bool livewp_swap_video_in_session(NSString *videoPath)
     r_msg2_main(g_livewp_player, "replaceCurrentItemWithPlayerItem:", newItem, 0, 0, 0);
     g_livewp_player_item = newItem;
     g_livewp_looper = newLooper;
-
-    // If looper init failed, force pause-on-end so repair can rewind.
-    if (!r_is_objc_ptr(newLooper)) {
-        r_msg2_main(g_livewp_player, "setActionAtItemEnd:",
-                    (uint64_t)1 /* AVPlayerActionAtItemEndPause */, 0, 0, 0);
-    }
 
     r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
     log_user("[LIVEWP] video swapped OK (looper=%s)\n",
@@ -352,14 +334,17 @@ static bool livewp_create_player(NSString *videoPath)
         }
     }
 
-    // If we don't have a working looper, force the player into Pause-on-end
-    // so the next livewp_repair_in_session tick can seekToTime:0 and replay.
-    // AVPlayerActionAtItemEndPause = 1 (NOT 0 = Advance, which would stop
-    // a single-item AVQueuePlayer entirely).
-    if (!r_is_objc_ptr(looper)) {
-        r_msg2_main(player, "setActionAtItemEnd:",
-                    (uint64_t)1 /* AVPlayerActionAtItemEndPause */, 0, 0, 0);
-    }
+    // If we don't have a working looper, the GCD timer in
+    // livewp_timer_fire handles looping by detecting end-of-stream and
+    // issuing a frame-accurate seekToTime:0 + play. We intentionally do
+    // NOT set actionAtItemEnd:Pause here: the default (Advance) on a
+    // single-item AVQueuePlayer is fine — the player will just sit at
+    // the last frame and our timer will catch the stuck state.
+    //
+    // (We previously forced actionAtItemEnd:Pause and rewound via
+    // livewp_repair_in_session, but seekToTime:0 through r_msg2_main
+    // desynced the layer's render clock and produced a black/frozen
+    // screen at item end.)
 
     // 两个 layer：一个给主屏幕，一个给锁屏
     uint64_t homeLayer = livewp_make_layer(player);
@@ -510,4 +495,88 @@ static void livewp_cleanup(void)
     g_livewp_looper = 0;
     g_livewp_home_window = 0;
     g_livewp_lock_window = 0;
+    g_livewp_tick = 0;
+}
+
+// MARK: - Loop driver (Cyanide-side GCD timer)
+//
+// AVPlayerLooper fails to init out-of-process on SpringBoard (private
+// init returns nil), and seekToTime:0 + play through r_msg2_main
+// desyncs the layer's render clock — the layer ends up on the last
+// frame, which presents as a black/frozen screen at item end.
+//
+// Workaround: drive the loop from our own process via a GCD timer.
+// Every 0.5s we peek at currentTime vs duration in the remote player;
+// once we cross end-of-stream we issue a *raw* seekToTime:0 (no
+// tolerance — frame-accurate) followed by play. We also re-attach
+// the layers to (possibly recycled) SBHomeScreenWindow /
+// SBCoverSheetWindow every 4th tick — that is what keeps the wallpaper
+// visible across Control Center pull-down, Spotlight, and app switcher
+// transitions.
+static void livewp_timer_fire(void)
+{
+    if (!g_livewp_configured) return;
+    if (!r_is_objc_ptr(g_livewp_player)) {
+        // Player died (SpringBoard respawn). Tear down and ask the host
+        // to rebuild on the next apply call.
+        livewp_forget_remote_state();
+        return;
+    }
+
+    // Loop only when AVPlayerLooper is NOT driving the queue. With a
+    // working looper we just need to make sure the layers are still
+    // parented and the player is playing.
+    if (!r_is_objc_ptr(g_livewp_looper) && r_is_objc_ptr(g_livewp_player_item)) {
+        struct { long long v; long long ts; } dur = {0, 0}, cur = {0, 0};
+        r_msg2_main_struct_ret(g_livewp_player_item, "duration", &dur, sizeof(dur),
+                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+        r_msg2_main_struct_ret(g_livewp_player, "currentTime", &cur, sizeof(cur),
+                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+        double durSec = (dur.ts > 0) ? (double)dur.v / (double)dur.ts : 0.0;
+        double curSec = (cur.ts > 0) ? (double)cur.v / (double)cur.ts : 0.0;
+        // Reached end-of-stream (or just past it). Rewind frame-accurately
+        // and re-play. We use a single r_msg2_main_raw block so seek and
+        // play land on the same autorelease drain on the remote side.
+        if (durSec > 0.0 && curSec >= durSec - 0.05) {
+            struct { long long v; long long ts; } zero = {0, 0};
+            r_msg2_main_raw(g_livewp_player, "seekToTime:",
+                            &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
+            r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
+        }
+    }
+
+    // Every 4 ticks (~2s) reattach layers. Cheap: livewp_ensure_layer_in_window
+    // is a no-op when the layer is already parented to the right window.
+    if ((++g_livewp_tick & 0x3) == 0) {
+        livewp_attach_and_play();
+    }
+}
+
+static void livewp_timer_start(void)
+{
+    if (g_livewp_timer) return;
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    g_livewp_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    if (!g_livewp_timer) {
+        log_user("[LIVEWP] timer create failed\n");
+        return;
+    }
+    // 0.5s period. start in 0.5s, leeway 0.1s for power.
+    dispatch_source_set_timer(g_livewp_timer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                              (uint64_t)(0.5 * NSEC_PER_SEC),
+                              (uint64_t)(0.1 * NSEC_PER_SEC));
+    __block static int _unused_anchor = 0; (void)_unused_anchor;
+    dispatch_source_set_event_handler(g_livewp_timer, ^{
+        livewp_timer_fire();
+    });
+    dispatch_resume(g_livewp_timer);
+    log_user("[LIVEWP] loop timer started (0.5s)\n");
+}
+
+static void livewp_timer_stop(void)
+{
+    if (!g_livewp_timer) return;
+    dispatch_source_cancel(g_livewp_timer);
+    g_livewp_timer = NULL;
 }
