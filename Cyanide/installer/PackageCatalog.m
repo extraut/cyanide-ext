@@ -233,7 +233,7 @@ static const NSInteger kSecNSBar            = 19;
                                 longDescription:@"Loops a user-selected video as a live wallpaper over the lock screen (SBCoverSheetWindow) and home screen (SBHomeScreenWindow) via RemoteCall. Pick any .mp4/.mov in Settings, then run Live Wallpaper to attach the AVPlayerLayer. Stop tears the layer down again.\n\nThe video is decoded twice — one player per window — and remains on screen until you stop the tweak, lock the device, or respring. Performance depends on the source video resolution; 1080p HEVC is the comfortable ceiling on tested devices.\n\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
                                         version:version
                                          author:@"d1y / zeroxjf"
-                                       category:@"Status Bar"
+                                       category:@"d1y Tweaks"
                                      symbolName:@"play.rectangle.on.rectangle.fill"
                                            kind:PackageInstallKindToggle
                                      enabledKey:kSettingsLiveWPEnabled
@@ -246,7 +246,7 @@ static const NSInteger kSecNSBar            = 19;
                                 longDescription:@"Place up to five small labels in the status-bar area, each with its own kind (off / custom text / system value / time format / weather), unit (C/F for the battery-temp system item), and styling. Slots are independent: you can show free RAM top-left, custom text top-right, lunar date bottom-center, and so on.\n\nAll values are polled on the Settings-side cadence; the tweak attaches one UIWindow at a low window level so scroll-to-top gestures still pass through to the system status bar.\n\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
                                         version:version
                                          author:@"d1y / zeroxjf"
-                                       category:@"Status Bar"
+                                       category:@"d1y Tweaks"
                                      symbolName:@"rectangle.split.3x1"
                                            kind:PackageInstallKindToggle
                                      enabledKey:kSettingsNiceBarLiteEnabled
@@ -259,7 +259,7 @@ static const NSInteger kSecNSBar            = 19;
                                 longDescription:@"Overlays a single label inside the status-bar area that shows live KB/s read and write totals since the last sample. Choose one of five anchor positions. The label width adapts to the current speed text length.\n\nThe tweak samples /var/ifaddrs counters on a fast cadence and writes the formatted result into a UIWindow at the same low window level used by NiceBar Lite. No private APIs are touched.\n\nCredits: d1y (d1y/cyanide-ios) for the original RemoteCall implementation."
                                         version:version
                                          author:@"d1y / zeroxjf"
-                                       category:@"Status Bar"
+                                       category:@"d1y Tweaks"
                                      symbolName:@"gauge.with.dots.needle.67percent"
                                            kind:PackageInstallKindToggle
                                      enabledKey:kSettingsNSBarEnabled
@@ -421,6 +421,7 @@ static const NSInteger kSecNSBar            = 19;
         @"System Updates",
         @"System",
         @"SpringBoard Tweaks",
+        @"d1y Tweaks",
     ];
     NSMutableArray<NSString *> *all = [NSMutableArray array];
     for (Package *p in [self allPackages]) {
