@@ -105,6 +105,23 @@ bool livewp_stop_in_session(void)
 bool livewp_repair_in_session(void)
 {
     if (!g_livewp_configured) return false;
+    // Manual loop: if the player reached item end (actionAtItemEnd=Pause),
+    // rewind it to zero and replay. Avoids AVPlayerLooper, which crashes
+    // when SpringBoard recycles its host window.
+    if (r_is_objc_ptr(g_livewp_player) && r_is_objc_ptr(g_livewp_player_item)) {
+        // currentTime >= duration means the item finished. Use a tiny
+        // epsilon so floating point drift doesn't keep us stuck.
+        struct { long long v; long long ts; } dur = {0, 0}, cur = {0, 0};
+        r_msg2_main_struct_ret(g_livewp_player_item, "duration", &dur, sizeof(dur),
+                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+        r_msg2_main_struct_ret(g_livewp_player, "currentTime", &cur, sizeof(cur),
+                               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+        if (cur.v >= dur.v && dur.v > 0) {
+            struct { long long v; long long ts; } zero = {0, 0};
+            r_msg2_main_raw(g_livewp_player, "seekToTime:",
+                            &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
+        }
+    }
     return livewp_attach_and_play();
 }
 
@@ -132,14 +149,8 @@ bool livewp_swap_video_in_session(NSString *videoPath)
 
     // replaceCurrentItemWithPlayerItem: — layer 保持不变，只是换了视频源
     r_msg2_main(g_livewp_player, "replaceCurrentItemWithPlayerItem:", newItem, 0, 0, 0);
-
-    // 重建 looper（旧 looper 持有的是旧 item，需要换成新的）
-    uint64_t looperCls = r_class("AVPlayerLooper");
-    if (r_is_objc_ptr(looperCls)) {
-        g_livewp_looper = r_msg2_main(looperCls, "playerLooperWithPlayer:templateItem:",
-                                       g_livewp_player, newItem, 0, 0);
-    }
     g_livewp_player_item = newItem;
+    // No more AVPlayerLooper; livewp_repair_in_session rewinds manually.
 
     r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
     log_user("[LIVEWP] video swapped OK\n");
@@ -199,10 +210,12 @@ static bool livewp_create_player(NSString *videoPath)
     r_msg2_main_raw(player, "setVolume:", &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
     r_msg2_main(player, "setPreventsDisplaySleepDuringVideoPlayback:", 0, 0, 0, 0);
 
-    uint64_t looperCls = r_class("AVPlayerLooper");
-    uint64_t looper = r_is_objc_ptr(looperCls)
-        ? r_msg2_main(looperCls, "playerLooperWithPlayer:templateItem:", player, playerItem, 0, 0)
-        : 0;
+    // Avoid AVPlayerLooper — it holds a strong reference to a templateItem
+    // and crashes when the host window is recycled (Control Center pull-down,
+    // Spotlight, app switcher). We loop manually: actionAtItemEnd=Pause, and
+    // livewp_repair_in_session rewinds the player to zero each tick and
+    // re-plays if the layer pair went idle.
+    r_msg2_main(player, "setActionAtItemEnd:", (uint64_t)0 /* AVPlayerActionAtItemEndPause */, 0, 0, 0);
 
     // 两个 layer：一个给主屏幕，一个给锁屏
     uint64_t homeLayer = livewp_make_layer(player);

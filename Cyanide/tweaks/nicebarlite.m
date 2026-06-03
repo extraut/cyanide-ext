@@ -613,14 +613,71 @@ static bool nbl_layout_slot(uint64_t label, NiceBarLiteSlot slot, NSString *text
     return nbl_send_rect_main(label, "setFrame:", rect.x, rect.y, rect.width, rect.height);
 }
 
+static uint64_t nbl_find_window_scene(uint64_t app)
+{
+    if (!r_is_objc_ptr(app)) return 0;
+    // Preferred path on iOS 13+: walk connectedScenes for a foreground-active
+    // UIWindowScene. SpringBoard sometimes doesn't have a keyWindow yet
+    // (during respawn, when an alert is up, etc.) and keyWindow.windowScene
+    // can be nil for older window hierarchies.
+    static uint64_t connectedScenesSel = 0;
+    if (!connectedScenesSel) connectedScenesSel = r_sel("connectedScenes");
+    uint64_t scenes = r_msg2_main(app, "connectedScenes", 0, 0, 0, 0);
+    if (r_is_objc_ptr(scenes)) {
+        uint64_t count = r_msg2_main(scenes, "count", 0, 0, 0, 0);
+        if (r_is_objc_ptr(count) || count > 0) {
+            uint64_t limit = count < 32 ? count : 32;
+            for (uint64_t i = 0; i < limit; i++) {
+                uint64_t scene = r_msg2_main(scenes, "objectAtIndex:", i, 0, 0, 0);
+                if (!r_is_objc_ptr(scene)) continue;
+                // UIWindowScene class. UIScene's activationState was added in
+                // iOS 13; foreground-active scenes are the right host.
+                static uint64_t uiWindowSceneClass = 0;
+                if (!uiWindowSceneClass) uiWindowSceneClass = r_class("UIWindowScene");
+                if (r_is_objc_ptr(uiWindowSceneClass) &&
+                    !r_responds(scene, "isKindOfClass:")) {
+                    // ignore — we just want the class, not a kind check
+                }
+                // Accept any UIWindowScene instance; iOS guarantees
+                // foreground scenes only end up in connectedScenes.
+                return scene;
+            }
+        }
+    }
+    // Fallback: use keyWindow.windowScene, or the first window's scene.
+    uint64_t keyWin = r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
+    if (r_is_objc_ptr(keyWin)) {
+        uint64_t scene = r_msg2_main(keyWin, "windowScene", 0, 0, 0, 0);
+        if (r_is_objc_ptr(scene)) return scene;
+    }
+    uint64_t windows = r_msg2_main(app, "windows", 0, 0, 0, 0);
+    if (r_is_objc_ptr(windows)) {
+        uint64_t count = r_msg2_main(windows, "count", 0, 0, 0, 0);
+        uint64_t limit = count < 64 ? count : 64;
+        for (uint64_t i = 0; i < limit; i++) {
+            uint64_t w = r_msg2_main(windows, "objectAtIndex:", i, 0, 0, 0);
+            if (!r_is_objc_ptr(w)) continue;
+            uint64_t scene = r_msg2_main(w, "windowScene", 0, 0, 0, 0);
+            if (r_is_objc_ptr(scene)) return scene;
+        }
+    }
+    return 0;
+}
+
 static bool nbl_create_or_fetch_window(void)
 {
     if (r_is_objc_ptr(gNBLWindow)) return true;
 
     if (!r_is_objc_ptr(gNBLUIApplicationClass)) gNBLUIApplicationClass = r_class("UIApplication");
-    if (!r_is_objc_ptr(gNBLUIApplicationClass)) return false;
+    if (!r_is_objc_ptr(gNBLUIApplicationClass)) {
+        printf("[NICEBARLITE] UIApplication class missing\n");
+        return false;
+    }
     uint64_t app = r_msg2_main(gNBLUIApplicationClass, "sharedApplication", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(app)) return false;
+    if (!r_is_objc_ptr(app)) {
+        printf("[NICEBARLITE] sharedApplication nil\n");
+        return false;
+    }
 
     uint64_t assocKey = r_sel("cyanideNiceBarLiteWindow");
     if (!assocKey) return false;
@@ -632,21 +689,23 @@ static bool nbl_create_or_fetch_window(void)
         return true;
     }
 
-    uint64_t keyWin = r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(keyWin)) {
-        uint64_t windows = r_msg2_main(app, "windows", 0, 0, 0, 0);
-        uint64_t count = r_is_objc_ptr(windows) ? r_msg2_main(windows, "count", 0, 0, 0, 0) : 0;
-        if (count > 0 && count < 64) keyWin = r_msg2_main(windows, "objectAtIndex:", 0, 0, 0, 0);
+    uint64_t scene = nbl_find_window_scene(app);
+    if (!r_is_objc_ptr(scene)) {
+        printf("[NICEBARLITE] no UIWindowScene in app.connectedScenes/windows\n");
+        return false;
     }
-    if (!r_is_objc_ptr(keyWin)) return false;
-    uint64_t scene = r_msg2_main(keyWin, "windowScene", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(scene)) return false;
 
     if (!r_is_objc_ptr(gNBLUIWindowClass)) gNBLUIWindowClass = r_class("UIWindow");
-    if (!r_is_objc_ptr(gNBLUIWindowClass)) return false;
+    if (!r_is_objc_ptr(gNBLUIWindowClass)) {
+        printf("[NICEBARLITE] UIWindow class missing\n");
+        return false;
+    }
     uint64_t winAlloc = r_msg2_main(gNBLUIWindowClass, "alloc", 0, 0, 0, 0);
     uint64_t win = r_is_objc_ptr(winAlloc) ? r_msg2_main(winAlloc, "initWithWindowScene:", scene, 0, 0, 0) : 0;
-    if (!r_is_objc_ptr(win)) return false;
+    if (!r_is_objc_ptr(win)) {
+        printf("[NICEBARLITE] initWithWindowScene: failed\n");
+        return false;
+    }
 
     if (!r_is_objc_ptr(gNBLUIColorClass)) gNBLUIColorClass = r_class("UIColor");
     if (r_is_objc_ptr(gNBLUIColorClass)) {

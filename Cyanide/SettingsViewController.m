@@ -6242,13 +6242,85 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 
 - (void)presentLiveWPVideoPicker
 {
+    // Ask the user where the video should come from. iOS already exposes a
+    // Photos entry inside UIDocumentPicker for public.movie, but showing a
+    // dedicated chooser up front makes the option obvious and lets us
+    // present Files with iCloud Drive as a distinct surface.
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"Pick Live Wallpaper Video"
+                         message:@"Choose a source."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Photos Library"
+                                           style:UIAlertActionStyleDefault
+                                         handler:^(UIAlertAction *a) {
+        (void)a;
+        [self presentLiveWPPhotosPicker];
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Files & iCloud Drive"
+                                           style:UIAlertActionStyleDefault
+                                         handler:^(UIAlertAction *a) {
+        (void)a;
+        [self presentLiveWPDocumentPicker];
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                           style:UIAlertActionStyleCancel
+                                         handler:nil]];
+
+    // iPad popover anchor — point at the picker button's cell so the sheet
+    // doesn't crash on regular-width devices.
+    UIPopoverPresentationController *pop = ac.popoverPresentationController;
+    if (pop) {
+        UIView *src = [self viewForAction:@"livewp-pick"];
+        if (src) {
+            pop.sourceView = src;
+            pop.sourceRect = src.bounds;
+        } else {
+            pop.sourceView = self.view;
+            pop.sourceRect = CGRectMake(self.view.bounds.size.width / 2.0,
+                                        self.view.bounds.size.height / 2.0,
+                                        1.0, 1.0);
+        }
+    }
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// Returns the cell view that owns the given action button, so the iPad
+// popover anchor lands on a real cell. Falls back to nil if not found.
+- (UIView *)viewForAction:(NSString *)action
+{
+    for (UITableViewCell *cell in self.tableView.visibleCells) {
+        NSIndexPath *ip = [self.tableView indexPathForCell:cell];
+        if (!ip) continue;
+        NSArray *rows = [self rowsForSection:ip.section];
+        if ((NSUInteger)ip.row >= rows.count) continue;
+        NSDictionary *row = rows[ip.row];
+        if ([row[@"action"] isEqualToString:action]) return cell;
+    }
+    return nil;
+}
+
+- (void)presentLiveWPPhotosPicker
+{
+    [self presentLiveWPDocumentPickerInternal];
+}
+
+- (void)presentLiveWPDocumentPicker
+{
+    [self presentLiveWPDocumentPickerInternal];
+}
+
+- (void)presentLiveWPDocumentPickerInternal
+{
     UTType *movieType = [UTType typeWithIdentifier:@"public.movie"];
     if (!movieType) movieType = UTTypeMovie;
     UIDocumentPickerViewController *picker =
-        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[movieType ?: UTTypeMovie]];
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[movieType ?: UTTypeMovie]
+                                                                  asCopy:YES];
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
     self.activeDocumentPickerMode = @"livewp";
+    [self presentViewController:picker animated:YES completion:nil];
+}
     [self presentViewController:picker animated:YES completion:nil];
 }
 
