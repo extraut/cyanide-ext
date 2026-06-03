@@ -148,6 +148,8 @@ static uint64_t anitime_find_cover_sheet_window(void)
     }
     return r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
 }
+    return r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
+}
 
 // Recursive subview walk, looking for the lock-screen clock view. Picks the
 // first view that is a kind of any of these classes (priority order):
@@ -235,7 +237,7 @@ static uint64_t anitime_load_gif_as_remote_uiimage(int digit)
         r_dlsym_call(R_TIMEOUT, "free", scratch, 0,0,0,0,0,0,0);
         return 0;
     }
-    uint64_t nsData = r_msg2_main(alloc, "initWithBytes:length:", scratch, (uint64_t)bytes.length, 0, 0, 0);
+    uint64_t nsData = r_msg2_main(alloc, "initWithBytes:length:", scratch, (uint64_t)bytes.length, 0, 0);
     if (!r_is_objc_ptr(nsData)) {
         r_dlsym_call(R_TIMEOUT, "free", scratch, 0,0,0,0,0,0,0);
         return 0;
@@ -308,10 +310,10 @@ static uint64_t anitime_ensure_container(AniTimeConfig cfg)
 
     // Match the clock view's frame.
     struct { double x, y, w, h; } rect;
-    if (r_msg2_main_struct_ret(gAniTimeClockView, "bounds", &rect, sizeof(rect), NULL,0, NULL,0, NULL,0)) {
+    if (r_msg2_main_struct_ret(gAniTimeClockView, "bounds", &rect, sizeof(rect), NULL, 0, NULL, 0, NULL, 0, NULL, 0)) {
         r_msg2_main_raw(container, "setFrame:",
                         &rect, sizeof(rect),
-                        NULL, 0, NULL, 0, NULL, 0);
+                        NULL, 0, NULL, 0, NULL, 0, NULL, 0);
     }
 
     // backgroundColor = clearColor via the static UIColor path.
@@ -471,7 +473,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg)
 
     // Compute per-slot frames.
     struct { double x, y, w, h; } bounds;
-    if (!r_msg2_main_struct_ret(container, "bounds", &bounds, sizeof(bounds), NULL,0, NULL,0, NULL,0)) {
+    if (!r_msg2_main_struct_ret(container, "bounds", &bounds, sizeof(bounds), NULL, 0, NULL, 0, NULL, 0, NULL, 0)) {
         printf("[ANITIME] failed to read container bounds\n");
         return false;
     }
@@ -507,7 +509,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg)
             r_msg2_main(container, "addSubview:", iv, 0, 0, 0);
             gAniTimeDigitViews[i] = iv;
         }
-        r_msg2_main_raw(iv, "setFrame:", &fr, sizeof(fr), NULL, 0, NULL, 0, NULL, 0);
+        r_msg2_main_raw(iv, "setFrame:", &fr, sizeof(fr), NULL, 0, NULL, 0, NULL, 0, NULL, 0);
 
         // Wrap the digit UIImage in a single-element NSArray for animationImages.
         uint64_t NSArrayCls = r_class("NSArray");
@@ -518,7 +520,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg)
             }
         }
         double dur = 1.0;
-        r_msg2_main_raw(iv, "setAnimationDuration:", &dur, sizeof(dur), NULL, 0, NULL, 0, NULL, 0);
+        r_msg2_main_raw(iv, "setAnimationDuration:", &dur, sizeof(dur), NULL, 0, NULL, 0, NULL, 0, NULL, 0);
         r_msg2_main(iv, "startAnimating", 0, 0, 0, 0);
     }
 
