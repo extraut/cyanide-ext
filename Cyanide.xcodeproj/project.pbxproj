@@ -573,7 +573,7 @@
 					"$(PROJECT_DIR)/Cyanide/XPF/external/ChOma/external/ios",
 					"$(PROJECT_DIR)/Cyanide/resident/output",
 				);
-				MARKETING_VERSION = 1.2.0;
+				MARKETING_VERSION = 1.2.1;
 				OTHER_CFLAGS = "";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.zeroxjf.ios-cyanide1";
 				PRODUCT_NAME = Cyanide;
@@ -623,7 +623,7 @@
 					"$(PROJECT_DIR)/Cyanide/XPF/external/ChOma/external/ios",
 					"$(PROJECT_DIR)/Cyanide/resident/output",
 				);
-				MARKETING_VERSION = 1.2.0;
+				MARKETING_VERSION = 1.2.1;
 				OTHER_CFLAGS = "";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.zeroxjf.ios-cyanide1";
 				PRODUCT_NAME = Cyanide;
