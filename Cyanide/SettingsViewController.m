@@ -4627,10 +4627,14 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         settings_progress(&step, total, "Starting AniTime lock-screen clock overlay");
                         AniTimeConfig cfg = anitime_config_from_defaults();
                         AniTimeFormat fmt = anitime_format_from_defaults();
+                        NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
+                        printf("[SETTINGS] AniTime run-path apply: start\n");
                         bool ok = anitime_apply_in_session(cfg, fmt);
+                        NSTimeInterval t1 = [NSDate timeIntervalSinceReferenceDate];
                         settings_mark_tweak_applied(kSettingsAniTimeEnabled,
                                                     ok && [d boolForKey:kSettingsAniTimeEnabled]);
-                        printf("[SETTINGS] AniTime result=%d\n", ok);
+                        printf("[SETTINGS] AniTime result=%d (run-path apply took %.3fs)\n",
+                               ok, t1 - t0);
                         log_user("%s AniTime %s.\n",
                                  ok ? "[OK]" : "[WARN]",
                                  ok ? "digit overlay attached" : "did not start cleanly");
@@ -4638,7 +4642,10 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         if (ok) settings_start_anitime_per_second_loop();
                     } else if (!anitimeEnabled) {
                         settings_end_anitime_per_second_loop("AniTime disabled at run");
+                        NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
                         anitime_stop_in_session();
+                        NSTimeInterval t1 = [NSDate timeIntervalSinceReferenceDate];
+                        printf("[SETTINGS] AniTime run-path stop took %.3fs\n", t1 - t0);
                     }
                 }
 
@@ -5748,23 +5755,69 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 
 // Decode every frame of a GIF via ImageIO so the preview UIImageView can
 // play the whole loop. +[UIImage imageWithData:] only returns the first
-// frame, which made the preview look static.
-+ (NSArray<UIImage *> *)anitimeGifFramesFromData:(NSData *)data
+// frame, which made the preview look static. We also return the total
+// animation duration out-of-band so the caller can build an animated
+// UIImage with the correct playback rate.
++ (NSDictionary *)anitimeDecodeGifData:(NSData *)data
 {
-    if (data.length == 0) return @[];
+    if (data.length == 0) return nil;
     CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-    if (!src) return @[];
+    if (!src) return nil;
     size_t count = CGImageSourceGetCount(src);
-    NSMutableArray<UIImage *> *out = [NSMutableArray arrayWithCapacity:count];
+    NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
+    NSTimeInterval total = 0.0;
+    CGFloat scale = UIScreen.mainScreen.scale;
     for (size_t i = 0; i < count; i++) {
         CGImageRef img = CGImageSourceCreateImageAtIndex(src, i, NULL);
         if (!img) continue;
-        UIImage *ui = [UIImage imageWithCGImage:img scale:UIScreen.mainScreen.scale orientation:UIImageOrientationUp];
+        // Use the image's own scale (0 means honour the source pixels) so
+        // we don't accidentally upscale a tiny GIF and then have UIImageView
+        // refuse to animate it as a sequence.
+        CGFloat frameScale = 1.0;
+        CFDictionaryRef props = CGImageSourceCopyPropertiesAtIndex(src, i, NULL);
+        if (props) {
+            CFNumberRef pxW = CFDictionaryGetValue(props, kCGImagePropertyPixelWidth);
+            CFNumberRef pxH = CFDictionaryGetValue(props, kCGImagePropertyPixelHeight);
+            CGFloat w = 0, h = 0;
+            if (pxW) CFNumberGetValue(pxW, kCFNumberCGFloatType, &w);
+            if (pxH) CFNumberGetValue(pxH, kCFNumberCGFloatType, &h);
+            if (w > 0 && h > 0) {
+                // Honour the source's natural scale; if the GIF was authored
+                // at 2x/3x, we keep that, otherwise we use the screen scale
+                // so retina devices don't get blurry frames.
+                frameScale = scale;
+            }
+            CFRelease(props);
+        }
+        UIImage *ui = [UIImage imageWithCGImage:img scale:frameScale orientation:UIImageOrientationUp];
         CGImageRelease(img);
-        if (ui) [out addObject:ui];
+        if (ui) [frames addObject:ui];
+
+        CFDictionaryRef frameProps = CGImageSourceCopyPropertiesAtIndex(src, i, NULL);
+        if (frameProps) {
+            CFDictionaryRef gifDict = CFDictionaryGetValue(frameProps, kCGImagePropertyGIFDictionary);
+            if (gifDict) {
+                CFNumberRef delay = CFDictionaryGetValue(gifDict, kCGImagePropertyGIFUnclampedDelayTime);
+                if (!delay) delay = CFDictionaryGetValue(gifDict, kCGImagePropertyGIFDelayTime);
+                double d = 0;
+                if (delay && CFNumberGetValue(delay, kCFNumberDoubleType, &d)) {
+                    if (d <= 0) d = 0.1; // browsers treat 0 as 100ms
+                    total += d;
+                } else {
+                    total += 0.1;
+                }
+            } else {
+                total += 0.1;
+            }
+            CFRelease(frameProps);
+        } else {
+            total += 0.1;
+        }
     }
     CFRelease(src);
-    return out;
+    if (frames.count == 0) return nil;
+    if (total <= 0) total = MAX(0.1, (double)frames.count * 0.1);
+    return @{ @"frames": frames, @"duration": @(total) };
 }
 
 - (NSArray<NSDictionary *> *)anitimeRows
@@ -6780,6 +6833,8 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 
 - (void)applyAniTimeNow
 {
+    NSTimeInterval hostStart = [NSDate timeIntervalSinceReferenceDate];
+    printf("[SETTINGS] AniTime manual apply: host start\n");
     if (!g_springboard_rc_ready) {
         [self runTweaksRequested:@"Activate AniTime now? Run kexploit first."];
         return;
@@ -6790,12 +6845,20 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     AniTimeConfig cfg = anitime_config_from_defaults();
     AniTimeFormat fmt = anitime_format_from_defaults();
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSTimeInterval queueStart = [NSDate timeIntervalSinceReferenceDate];
         @synchronized (settings_rc_lock()) {
+            NSTimeInterval lockStart = [NSDate timeIntervalSinceReferenceDate];
             if (!g_springboard_rc_ready) return;
             bool ok = anitime_apply_in_session(cfg, fmt);
+            NSTimeInterval lockEnd = [NSDate timeIntervalSinceReferenceDate];
             settings_mark_tweak_applied(kSettingsAniTimeEnabled,
                                         ok && [d boolForKey:kSettingsAniTimeEnabled]);
-            printf("[SETTINGS] AniTime manual apply result=%d\n", ok);
+            printf("[SETTINGS] AniTime manual apply result=%d (rc lock held %.3fs; "
+                   "queue wait %.3fs; host→queue %.3fs)\n",
+                   ok,
+                   lockEnd - lockStart,
+                   queueStart - hostStart,
+                   queueStart - hostStart);
         }
         settings_start_anitime_per_second_loop();
         settings_notify_package_queue_changed_async();
@@ -6804,10 +6867,20 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 
 - (void)stopAniTimeNow
 {
+    NSTimeInterval hostStart = [NSDate timeIntervalSinceReferenceDate];
+    printf("[SETTINGS] AniTime manual stop: host start\n");
     settings_end_anitime_per_second_loop("AniTime deactivated");
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSTimeInterval queueStart = [NSDate timeIntervalSinceReferenceDate];
         @synchronized (settings_rc_lock()) {
+            NSTimeInterval lockStart = [NSDate timeIntervalSinceReferenceDate];
             if (g_springboard_rc_ready) anitime_stop_in_session();
+            NSTimeInterval lockEnd = [NSDate timeIntervalSinceReferenceDate];
+            printf("[SETTINGS] AniTime manual stop: rc lock held %.3fs; "
+                   "queue wait %.3fs; host→queue %.3fs\n",
+                   lockEnd - lockStart,
+                   queueStart - hostStart,
+                   queueStart - hostStart);
         }
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kSettingsAniTimeEnabled];
         [[NSUserDefaults standardUserDefaults] synchronize];
@@ -7957,13 +8030,15 @@ void cyanide_present_contact(UIViewController *host)
         stack.translatesAutoresizingMaskIntoConstraints = NO;
         stack.axis = UILayoutConstraintAxisHorizontal;
         stack.alignment = UIStackViewAlignmentCenter;
-        stack.distribution = UIStackViewDistributionFillProportionally;
-        stack.spacing = 4.0;
+        // Keep the digit pair (3,4) close to the rest of the row instead of
+        // letting the trailing constraint push them to the far edge.
+        stack.distribution = UIStackViewDistributionFill;
+        stack.spacing = 2.0;
 
         // Five slots: 1, 2, dash, 3, 4 — fixed demo so the preview is always
         // recognisable regardless of the wall clock. We extract every GIF
-        // frame via CGImageSource so animationImages plays the whole loop,
-        // not just the first frame (which is what +imageWithData: gives).
+        // frame via CGImageSource and build an animated UIImage so the
+        // preview actually plays the loop, not just frame 0.
         NSArray<NSString *> *demoNames = @[ @"1", @"2", @"dash", @"3", @"4" ];
         for (NSString *name in demoNames) {
             UIImageView *iv = [[UIImageView alloc] init];
@@ -7972,13 +8047,23 @@ void cyanide_present_contact(UIViewController *host)
             NSString *path = [[NSBundle mainBundle] pathForResource:name ofType:@"gif"];
             NSData *bytes = path ? [NSData dataWithContentsOfFile:path] : nil;
             if (bytes.length > 0) {
-                NSArray<UIImage *> *frames = [self.class anitimeGifFramesFromData:bytes];
-                if (frames.count > 0) {
+                NSDictionary *decoded = [self.class anitimeDecodeGifData:bytes];
+                NSArray<UIImage *> *frames = decoded[@"frames"];
+                NSTimeInterval dur = [decoded[@"duration"] doubleValue];
+                if (frames.count >= 2 && dur > 0) {
+                    UIImage *animated = [UIImage animatedImageWithImages:frames duration:dur];
+                    if (animated) {
+                        iv.image = animated;
+                    } else {
+                        iv.image = frames.firstObject;
+                        iv.animationImages = frames;
+                        iv.animationDuration = dur;
+                        iv.animationRepeatCount = 0;
+                    }
+                } else if (frames.count == 1) {
+                    // Single-frame "GIF" (static image). Still show it so the
+                    // user knows the file is present.
                     iv.image = frames.firstObject;
-                    iv.animationImages = frames;
-                    iv.animationDuration = 1.0;
-                    iv.animationRepeatCount = 0;
-                    [iv startAnimating];
                 }
             }
             [iv.widthAnchor constraintEqualToConstant:36.0].active = YES;
@@ -7986,17 +8071,31 @@ void cyanide_present_contact(UIViewController *host)
             [stack addArrangedSubview:iv];
         }
 
-        [cell.contentView addSubview:title];
-        [cell.contentView addSubview:stack];
+        // Use a content-hugging wrapper so the title and the row of digits
+        // sit side-by-side without the row being pushed to the trailing edge
+        // (which made the minute pair look far apart from the rest).
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[ title, stack ]];
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+        row.axis = UILayoutConstraintAxisHorizontal;
+        row.alignment = UIStackViewAlignmentCenter;
+        row.spacing = 12.0;
+        row.distribution = UIStackViewDistributionFill;
+
+        [cell.contentView addSubview:row];
         UILayoutGuide *m = cell.contentView.layoutMarginsGuide;
         [NSLayoutConstraint activateConstraints:@[
-            [title.leadingAnchor constraintEqualToAnchor:m.leadingAnchor],
-            [title.topAnchor constraintEqualToAnchor:m.topAnchor],
-            [stack.centerXAnchor constraintEqualToAnchor:cell.contentView.centerXAnchor],
-            [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:title.trailingAnchor constant:8.0],
-            [stack.topAnchor constraintEqualToAnchor:m.topAnchor],
-            [stack.bottomAnchor constraintEqualToAnchor:m.bottomAnchor],
-            [stack.trailingAnchor constraintEqualToAnchor:m.trailingAnchor],
+            [row.leadingAnchor constraintEqualToAnchor:m.leadingAnchor],
+            [row.trailingAnchor constraintEqualToAnchor:m.trailingAnchor],
+            [row.topAnchor constraintEqualToAnchor:m.topAnchor],
+            [row.bottomAnchor constraintEqualToAnchor:m.bottomAnchor],
+
+            // Keep the digit row compact: the stack should hug its content
+            // instead of stretching to fill the cell, so the trailing
+            // minutes pair stays tight against the rest.
+            [stack setContentHuggingPriority:UILayoutPriorityRequired
+                                      forAxis:UILayoutConstraintAxisHorizontal],
+            [stack setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                                   forAxis:UILayoutConstraintAxisHorizontal],
         ]];
         return cell;
     }

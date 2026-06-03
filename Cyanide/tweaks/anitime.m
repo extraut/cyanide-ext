@@ -112,8 +112,11 @@ static void anitime_resolve_classes(void)
 
 #pragma mark - Lock-screen clock view discovery
 
-// Returns the SBCoverSheetWindow if found, else 0.
-static uint64_t anitime_find_cover_sheet_window(void)
+// Try to find a window that hosts the lock-screen clock. We don't require
+// the class to be exactly SBCoverSheetWindow: on iOS 18/26 the lock screen
+// can live under SBLockScreenWindow, SBHomeScreenWindow, or even a freshly
+// created scene window. Returns the first candidate we can walk.
+static uint64_t anitime_find_lock_screen_window(void)
 {
     uint64_t UIApp = r_class("UIApplication");
     if (!r_is_objc_ptr(UIApp)) return 0;
@@ -124,41 +127,73 @@ static uint64_t anitime_find_cover_sheet_window(void)
         return r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
     }
     uint64_t count = r_msg2_main(windows, "count", 0, 0, 0, 0);
-    if (count == 0 || count > 32) {
+    if (count == 0 || count > 64) {
         return r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
     }
-    uint64_t csClass = r_class("SBCoverSheetWindow");
-    for (uint64_t i = 0; i < count; i++) {
-        uint64_t w = r_msg2_main(windows, "objectAtIndex:", i, 0, 0, 0);
-        if (!r_is_objc_ptr(w)) continue;
-        if (r_is_objc_ptr(csClass) &&
-            (r_msg2(w, "isKindOfClass:", csClass, 0, 0, 0) & 0xff)) {
-            return w;
+
+    // Window-class candidates, in order of how likely they are to host the
+    // lock-screen clock on iOS 17..26.
+    static const char *kWindowClasses[] = {
+        "SBCoverSheetWindow",          // iOS 17, the classic cover sheet
+        "SBLockScreenWindow",          // iOS 18+ scene-based lock screen
+        "SBHomeScreenWindow",           // home screen, but it also hosts CS clock
+        "SBSceneManagerWindow",         // general scene manager window
+        "SBFluidShieldWindow",          // notification center
+    };
+    int foundClasses[sizeof(kWindowClasses)/sizeof(kWindowClasses[0])];
+    int nFound = 0;
+    for (size_t i = 0; i < sizeof(kWindowClasses)/sizeof(kWindowClasses[0]); i++) {
+        uint64_t cls = r_class(kWindowClasses[i]);
+        if (r_is_objc_ptr(cls)) foundClasses[nFound++] = (int)i;
+    }
+
+    // First pass: prefer the explicit lock-screen classes.
+    for (int i = 0; i < nFound; i++) {
+        int idx = foundClasses[i];
+        // Skip the notification-center one unless nothing else matches.
+        if (idx == 4) continue;
+        uint64_t cls = r_class(kWindowClasses[idx]);
+        for (uint64_t w = 0; w < count; w++) {
+            uint64_t win = r_msg2_main(windows, "objectAtIndex:", w, 0, 0, 0);
+            if (!r_is_objc_ptr(win)) continue;
+            if ((r_msg2(win, "isKindOfClass:", cls, 0, 0, 0) & 0xff)) {
+                return win;
+            }
         }
+    }
+    // Fall back to the first window — usually the active scene, which is
+    // good enough for the recursive subview walk below.
+    if (count > 0) {
+        return r_msg2_main(windows, "objectAtIndex:", 0, 0, 0, 0);
     }
     return r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
 }
 
-// Recursive subview walk for the lock-screen clock view.
+// Recursive subview walk for the lock-screen clock view. We try a wide
+// roster of class names so we survive private renames across iOS versions.
 static uint64_t anitime_walk_for_clock_view(uint64_t view, int depth, int *visited)
 {
-    if (depth > 12) return 0;
+    if (depth > 16) return 0;
     if (!r_is_objc_ptr(view)) return 0;
-    if (*visited > 4096) return 0;
+    if (*visited > 8192) return 0;
     (*visited)++;
 
     static const char *kCandidates[] = {
         "CSLockScreenClockView",
         "_UILockScreenClockView",
+        "CSLockScreenDateTimeView",
         "SBUIMainClockView",
         "SBUIClockView",
         "SBUIAnalogClockView",
+        "SBUIQuietClockView",
+        "CSCoverSheetViewController", // parent controller view as a last resort
         "CSLockScreenView",
     };
     for (size_t i = 0; i < sizeof(kCandidates)/sizeof(kCandidates[0]); i++) {
         uint64_t cls = r_class(kCandidates[i]);
         if (!r_is_objc_ptr(cls)) continue;
         if ((r_msg2(view, "isKindOfClass:", cls, 0, 0, 0) & 0xff)) {
+            printf("[ANITIME] clock view hit on candidate=%s\n", kCandidates[i]);
             return view;
         }
     }
@@ -166,7 +201,7 @@ static uint64_t anitime_walk_for_clock_view(uint64_t view, int depth, int *visit
     uint64_t subs = r_msg2_main(view, "subviews", 0, 0, 0, 0);
     if (!r_is_objc_ptr(subs)) return 0;
     uint64_t cnt = r_msg2_main(subs, "count", 0, 0, 0, 0);
-    if (cnt == 0 || cnt > 256) return 0;
+    if (cnt == 0 || cnt > 512) return 0;
     for (uint64_t i = 0; i < cnt; i++) {
         uint64_t sub = r_msg2_main(subs, "objectAtIndex:", i, 0, 0, 0);
         if (!r_is_objc_ptr(sub)) continue;
@@ -369,32 +404,71 @@ static int anitime_digit_for_slot(int slot, AniTimeFormat fmt, NSDate *now, int 
 
 #pragma mark - Apply / stop
 
+// Returns a monotonically increasing wall-clock time in seconds. CFAbsolute
+// uses the system clock so deltas are stable across threads.
+static double anitime_now_seconds(void)
+{
+    return CFAbsoluteTimeGetCurrent();
+}
+
 // Resolve the system clock view once per apply, then reuse the cached
 // pointer. Reset to 0 from forget_remote_state on respawn.
+//
+// The lock screen is created lazily — when the user enables the tweak from
+// the home screen the SBCoverSheetWindow may not exist yet, or the clock
+// view inside it may not have been instantiated. We retry a few times with
+// a short sleep so a cold-start tap on Activate doesn't fail.
 static uint64_t anitime_resolve_clock_view(void)
 {
-    uint64_t win = anitime_find_cover_sheet_window();
-    if (!r_is_objc_ptr(win)) {
-        return 0;
+    const int kMaxAttempts = 6;
+    const useconds_t kRetryDelayUS = 500000; // 0.5 s
+
+    uint64_t clockView = 0;
+    for (int attempt = 1; attempt <= kMaxAttempts; attempt++) {
+        uint64_t win = anitime_find_lock_screen_window();
+        if (!r_is_objc_ptr(win)) {
+            printf("[ANITIME] no lock-screen window on attempt %d/%d\n",
+                   attempt, kMaxAttempts);
+        } else {
+            uint64_t rvc = r_msg2_main(win, "rootViewController", 0, 0, 0, 0);
+            uint64_t rootView = r_is_objc_ptr(rvc) ? r_msg2_main(rvc, "view", 0, 0, 0, 0) : 0;
+            if (!r_is_objc_ptr(rootView)) {
+                rootView = r_msg2_main(win, "view", 0, 0, 0, 0);
+            }
+            if (r_is_objc_ptr(rootView)) {
+                clockView = anitime_find_clock_view(rootView);
+                if (r_is_objc_ptr(clockView)) {
+                    if (attempt > 1) {
+                        printf("[ANITIME] clock view resolved on attempt %d/%d\n",
+                               attempt, kMaxAttempts);
+                    }
+                    return clockView;
+                }
+                printf("[ANITIME] clock view not found in window on attempt %d/%d\n",
+                       attempt, kMaxAttempts);
+            } else {
+                printf("[ANITIME] no root view on attempt %d/%d\n",
+                       attempt, kMaxAttempts);
+            }
+        }
+        if (attempt < kMaxAttempts) {
+            usleep((useconds_t)kRetryDelayUS);
+        }
     }
-    uint64_t rvc = r_msg2_main(win, "rootViewController", 0, 0, 0, 0);
-    uint64_t rootView = r_is_objc_ptr(rvc) ? r_msg2_main(rvc, "view", 0, 0, 0, 0) : 0;
-    if (!r_is_objc_ptr(rootView)) {
-        rootView = r_msg2_main(win, "view", 0, 0, 0, 0);
-    }
-    if (!r_is_objc_ptr(rootView)) {
-        return 0;
-    }
-    uint64_t clockView = anitime_find_clock_view(rootView);
-    if (!r_is_objc_ptr(clockView)) {
-        return 0;
-    }
-    return clockView;
+    return 0;
 }
 
 bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
 {
+    double t_start = anitime_now_seconds();
+    double t_after_classes = t_start;
+    double t_after_clock   = t_start;
+    double t_after_gifs    = t_start;
+    double t_after_container = t_start;
+    double t_after_layout  = t_start;
+
     anitime_resolve_classes();
+    t_after_classes = anitime_now_seconds();
 
     if (!r_is_objc_ptr(gAniTimeUIViewClass) ||
         !r_is_objc_ptr(gAniTimeUIImageClass) ||
@@ -423,6 +497,8 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
         // Even on the fast path, refresh the slot frames once so a clock
         // resize (e.g. after the user opens/closes Control Center) doesn't
         // leave the overlay mis-aligned. This is a single struct read.
+        double t_end = anitime_now_seconds();
+        printf("[ANITIME] apply fast-path took %.3fs (total)\n", t_end - t_start);
         return true;
     }
 
@@ -432,36 +508,44 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
     if (!r_is_objc_ptr(gAniTimeClockView)) {
         gAniTimeClockView = anitime_resolve_clock_view();
         if (!r_is_objc_ptr(gAniTimeClockView)) {
-            printf("[ANITIME] lock-screen clock view not found\n");
+            printf("[ANITIME] lock-screen clock view not found (after %.3fs)\n",
+                   anitime_now_seconds() - t_start);
             return false;
         }
     }
+    t_after_clock = anitime_now_seconds();
 
     // Make sure the digit GIFs are decoded at least once for this session.
     if (!gAniTimeLoadedGifs) {
         anitime_load_all_slot_images();
         for (int d = 0; d < kAniTimeDigitCount; d++) {
             if (!r_is_objc_ptr(gAniTimeSlotImages[d])) {
-                printf("[ANITIME] digit %d image unavailable; bailing\n", d);
+                printf("[ANITIME] digit %d image unavailable; bailing (after %.3fs)\n",
+                       d, anitime_now_seconds() - t_start);
                 return false;
             }
         }
         if (!r_is_objc_ptr(gAniTimeSlotImages[kAniTimeDigitCount])) {
-            printf("[ANITIME] colon image unavailable; bailing\n");
+            printf("[ANITIME] colon image unavailable; bailing (after %.3fs)\n",
+                   anitime_now_seconds() - t_start);
             return false;
         }
     }
+    t_after_gifs = anitime_now_seconds();
 
     uint64_t container = anitime_ensure_container();
     if (!r_is_objc_ptr(container)) {
-        printf("[ANITIME] container alloc failed\n");
+        printf("[ANITIME] container alloc failed (after %.3fs)\n",
+               anitime_now_seconds() - t_start);
         return false;
     }
+    t_after_container = anitime_now_seconds();
 
     struct { double x, y, w, h; } rect;
     if (!r_msg2_main_struct_ret(container, "frame", &rect, sizeof(rect), NULL,0, NULL,0, NULL,0, NULL,0)) {
         if (!r_msg2_main_struct_ret(container, "bounds", &rect, sizeof(rect), NULL,0, NULL,0, NULL,0, NULL,0)) {
-            printf("[ANITIME] failed to read container frame\n");
+            printf("[ANITIME] failed to read container frame (after %.3fs)\n",
+                   anitime_now_seconds() - t_start);
             return false;
         }
     }
@@ -470,6 +554,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
     double digitW = 0, digitH = 0;
     anitime_layout_slots(rect.w, rect.h, cfg.enabled, cfg.spacing,
                          &digitW, &digitH, slotX, slotY, slotW, slotH);
+    t_after_layout = anitime_now_seconds();
 
     NSDate *now = [NSDate date];
 
@@ -529,12 +614,24 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
     gAniTimeCachedConfig = cfg;
     gAniTimeCachedFormat = fmt;
     gAniTimeCachedConfigValid = true;
+
+    double t_end = anitime_now_seconds();
+    printf("[ANITIME] apply cold-path took %.3fs total | "
+           "classes=%.3fs clock=%.3fs gifs=%.3fs container=%.3fs layout=%.3fs slots=%.3fs\n",
+           t_end - t_start,
+           t_after_classes - t_start,
+           t_after_clock   - t_after_classes,
+           t_after_gifs    - t_after_clock,
+           t_after_container - t_after_gifs,
+           t_after_layout  - t_after_container,
+           t_end           - t_after_layout);
     anitime_log_apply(cfg, fmt);
     return true;
 }
 
 bool anitime_stop_in_session(void)
 {
+    double t_start = anitime_now_seconds();
     // Unhide the system clock first so it comes back when the overlay goes
     // away (the cached pointer is still live at this point).
     if (r_is_objc_ptr(gAniTimeClockView)) {
@@ -554,7 +651,8 @@ bool anitime_stop_in_session(void)
         }
     }
     gAniTimeCachedConfigValid = false;
-    printf("[ANITIME] overlay: stopped\n");
+    double t_end = anitime_now_seconds();
+    printf("[ANITIME] stop took %.3fs total\n", t_end - t_start);
     return true;
 }
 
