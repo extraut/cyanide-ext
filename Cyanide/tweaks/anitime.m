@@ -393,7 +393,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
     uint64_t rvc = r_msg2_main(win, "rootViewController", 0, 0, 0, 0);
     uint64_t rootView = r_is_objc_ptr(rvc) ? r_msg2_main(rvc, "view", 0, 0, 0, 0) : 0;
     if (!r_is_objc_ptr(rootView)) {
-        rootView = r_msg2_main(win, "view", 0, 0, 0);
+        rootView = r_msg2_main(win, "view", 0, 0, 0, 0);
     }
     if (!r_is_objc_ptr(rootView)) {
         printf("[ANITIME] rootView missing\n");
@@ -453,7 +453,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
         // digit value for this slot actually changes (or the slot is fresh).
         if (!r_is_objc_ptr(gAniTimeSlotArrays[i]) || gAniTimeSlotArrayDigit[i] != targetDigit) {
             if (r_is_objc_ptr(gAniTimeSlotArrays[i])) {
-                r_msg2_main(gAniTimeSlotArrays[i], "release", 0, 0, 0);
+                r_msg2_main(gAniTimeSlotArrays[i], "release", 0, 0, 0, 0);
                 gAniTimeSlotArrays[i] = 0;
             }
             uint64_t NSArrayCls = r_class("NSArray");
@@ -463,7 +463,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
             if (r_is_objc_ptr(NSArrayCls) && r_is_objc_ptr(srcImage)) {
                 uint64_t arr = r_msg2_main(NSArrayCls, "arrayWithObject:", srcImage, 0, 0, 0);
                 if (r_is_objc_ptr(arr)) {
-                    gAniTimeSlotArrays[i] = r_msg2_main(arr, "retain", 0, 0, 0);
+                    gAniTimeSlotArrays[i] = r_msg2_main(arr, "retain", 0, 0, 0, 0);
                 }
             }
             gAniTimeSlotArrayDigit[i] = targetDigit;
@@ -471,7 +471,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
                 r_msg2_main(iv, "setAnimationImages:", gAniTimeSlotArrays[i], 0, 0, 0);
                 double dur = 1.0;
                 r_msg2_main_raw(iv, "setAnimationDuration:", &dur, sizeof(dur), NULL, 0, NULL, 0, NULL, 0);
-                r_msg2_main(iv, "startAnimating", 0, 0, 0);
+                r_msg2_main(iv, "startAnimating", 0, 0, 0, 0);
             }
         }
     }
@@ -486,15 +486,15 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
 bool anitime_stop_in_session(void)
 {
     if (r_is_objc_ptr(gAniTimeContainer)) {
-        r_msg2_main_async(gAniTimeContainer, "removeFromSuperview", 0, 0, 0);
-        r_msg2_main(gAniTimeContainer, "release", 0, 0, 0);
+        r_msg2_main_async(gAniTimeContainer, "removeFromSuperview", 0, 0, 0, 0);
+        r_msg2_main(gAniTimeContainer, "release", 0, 0, 0, 0);
         gAniTimeContainer = 0;
     }
     for (int i = 0; i < kAniTimeSlots; i++) {
         if (r_is_objc_ptr(gAniTimeSlotViews[i])) {
-            r_msg2_main(gAniTimeSlotViews[i], "stopAnimating", 0, 0, 0);
-            r_msg2_main_async(gAniTimeSlotViews[i], "removeFromSuperview", 0, 0, 0);
-            r_msg2_main(gAniTimeSlotViews[i], "release", 0, 0, 0);
+            r_msg2_main(gAniTimeSlotViews[i], "stopAnimating", 0, 0, 0, 0);
+            r_msg2_main_async(gAniTimeSlotViews[i], "removeFromSuperview", 0, 0, 0, 0);
+            r_msg2_main(gAniTimeSlotViews[i], "release", 0, 0, 0, 0);
             gAniTimeSlotViews[i] = 0;
         }
     }
@@ -516,14 +516,14 @@ void anitime_forget_remote_state(void)
     for (int i = 0; i < kAniTimeSlots; i++) {
         gAniTimeSlotViews[i] = 0;
         if (r_is_objc_ptr(gAniTimeSlotArrays[i])) {
-            r_msg2_main(gAniTimeSlotArrays[i], "release", 0, 0, 0);
+            r_msg2_main(gAniTimeSlotArrays[i], "release", 0, 0, 0, 0);
             gAniTimeSlotArrays[i] = 0;
         }
         gAniTimeSlotArrayDigit[i] = -1;
     }
     for (int i = 0; i < kAniTimeDigitCount + 1; i++) {
         if (r_is_objc_ptr(gAniTimeSlotImages[i])) {
-            r_msg2_main(gAniTimeSlotImages[i], "release", 0, 0, 0);
+            r_msg2_main(gAniTimeSlotImages[i], "release", 0, 0, 0, 0);
             gAniTimeSlotImages[i] = 0;
         }
     }
