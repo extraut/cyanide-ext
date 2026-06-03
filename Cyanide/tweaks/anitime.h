@@ -1,7 +1,7 @@
 //
 //  anitime.h
 //  AniTime: replace the iOS lock-screen clock digits with bundled animated GIFs.
-//  Author: extra
+//  Tweak by extra.
 //
 
 #ifndef anitime_h
@@ -15,18 +15,13 @@
 #endif
 
 typedef enum {
-    AniTimeSizeOff     = 0,  // overlay not visible
-    AniTimeSizeCompact = 1,  // standard compact overlay (default)
-} AniTimeSize;
-
-typedef enum {
     AniTimeFormat12h = 0,
     AniTimeFormat24h = 1,
 } AniTimeFormat;
 
 typedef struct {
-    AniTimeSize size;     // 0 = off, 1 = compact
-    int         spacing;  // pt between slots, 0..16
+    bool enabled;   // master on/off (AniTimeEnabled)
+    int  spacing;   // pt between slots, 0..16
 } AniTimeConfig;
 
 bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt);

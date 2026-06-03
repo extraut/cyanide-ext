@@ -1,11 +1,12 @@
 //
 //  anitime.m
 //  AniTime: replace the iOS lock-screen clock digits with bundled animated GIFs.
-//  Author: extra
+//  Tweak by extra.
 //
 //  5-slot layout HH:MM (digits 0..9 + a single colon/dash). On the lock screen
 //  the overlay is attached as a sibling of the system clock view, so it moves
-//  with the lock screen as the user drags the sheet.
+//  with the lock screen as the user drags the sheet. The original clock view
+//  is hidden so the animated GIFs occupy the same on-screen position.
 //
 
 #import "anitime.h"
@@ -31,6 +32,11 @@ static const int   kAniTimeMaxFrameBytes   = 256 * 1024; // per-GIF safety bound
 // (or colon.gif, etc.) to the anitime/ folder themselves.
 #define kAniTimeColonResourceName "dash"
 
+// How tall the overlay should be on a typical lock screen. Picked to match
+// the iOS lock-screen clock so the swap is visually clean. The container is
+// always sized to the system clock's bounds when present.
+static const double kAniTimeDefaultFrameHeight = 130.0;
+
 #pragma mark - Cached remote state
 
 static uint64_t gAniTimeClockView         = 0;
@@ -47,7 +53,7 @@ static uint64_t gAniTimeUIImageClass      = 0;
 static uint64_t gAniTimeNSDataClass       = 0;
 static int      gAniTimeLoadedGifs        = 0;
 static bool     gAniTimeCachedConfigValid = false;
-static AniTimeConfig gAniTimeCachedConfig = { AniTimeSizeCompact, 4 };
+static AniTimeConfig gAniTimeCachedConfig = { true, 4 };
 static AniTimeFormat gAniTimeCachedFormat = AniTimeFormat12h;
 
 #pragma mark - Defaults accessor (host-side)
@@ -56,9 +62,7 @@ AniTimeConfig anitime_config_from_defaults(void)
 {
     AniTimeConfig cfg;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    NSInteger size = [d integerForKey:@"AniTimeSize"];
-    if (size != 0 && size != 1) size = 1; // default = on (compact)
-    cfg.size = (AniTimeSize)size;
+    cfg.enabled = [d boolForKey:@"AniTimeEnabled"];
     NSInteger sp = [d integerForKey:@"AniTimeSpacing"];
     if (sp < 0) sp = 0;
     if (sp > 16) sp = 16;
@@ -76,28 +80,24 @@ AniTimeFormat anitime_format_from_defaults(void)
 
 static bool anitime_config_equal(AniTimeConfig a, AniTimeConfig b)
 {
-    return a.size == b.size && a.spacing == b.spacing;
+    return a.enabled == b.enabled && a.spacing == b.spacing;
 }
 
 #pragma mark - Helpers
 
 static void anitime_log_apply(AniTimeConfig cfg, AniTimeFormat fmt)
 {
-    static const char *sizeNames[] = { "Off", "Compact" };
     static const char *fmtNames[]  = { "12h", "24h" };
-    int sIdx = (int)cfg.size;
-    if (sIdx < 0) sIdx = 0;
-    if (sIdx > 1) sIdx = 1;
     int fIdx = (int)fmt;
     if (fIdx < 0) fIdx = 0;
     if (fIdx > 1) fIdx = 1;
-    printf("[ANITIME] apply size=%s spacing=%dpt format=%s\n",
-           sizeNames[sIdx], cfg.spacing, fmtNames[fIdx]);
+    printf("[ANITIME] apply enabled=%d spacing=%dpt format=%s\n",
+           cfg.enabled ? 1 : 0, cfg.spacing, fmtNames[fIdx]);
 }
 
-static double anitime_frame_for_size(AniTimeSize size)
+static double anitime_frame_for_config(AniTimeConfig cfg)
 {
-    return (size == AniTimeSizeOff) ? 0.0 : 96.0;
+    return cfg.enabled ? kAniTimeDefaultFrameHeight : 0.0;
 }
 
 #pragma mark - Lazy selector / class resolution
@@ -267,12 +267,22 @@ static uint64_t anitime_ensure_container(void)
     uint64_t container = r_msg2_main(alloc, "init", 0, 0, 0, 0);
     if (!r_is_objc_ptr(container)) return 0;
 
-    // Match the clock view's bounds.
+    // Match the clock view's frame (not just bounds) so the overlay sits
+    // exactly where the system clock was. SB positions the clock with its
+    // frame, and the lock sheet moves the clock's superview when the user
+    // drags the sheet.
     struct { double x, y, w, h; } rect;
-    if (r_msg2_main_struct_ret(gAniTimeClockView, "bounds", &rect, sizeof(rect), NULL,0, NULL,0, NULL,0, NULL,0)) {
+    if (r_msg2_main_struct_ret(gAniTimeClockView, "frame", &rect, sizeof(rect), NULL,0, NULL,0, NULL,0, NULL,0)) {
         r_msg2_main_raw(container, "setFrame:",
                         &rect, sizeof(rect),
                         NULL, 0, NULL, 0, NULL, 0);
+    } else {
+        struct { double x, y, w, h; } bRect;
+        if (r_msg2_main_struct_ret(gAniTimeClockView, "bounds", &bRect, sizeof(bRect), NULL,0, NULL,0, NULL,0, NULL,0)) {
+            r_msg2_main_raw(container, "setFrame:",
+                            &bRect, sizeof(bRect),
+                            NULL, 0, NULL, 0, NULL, 0);
+        }
     }
 
     uint64_t UIColor = r_class("UIColor");
@@ -286,29 +296,41 @@ static uint64_t anitime_ensure_container(void)
 
     // Attach as a sibling of the system clock (so dragging the lock sheet
     // moves the overlay with it).
-    r_msg2_main(gAniTimeClockView, "addSubview:", container, 0, 0, 0);
+    r_msg2_main(gAniTimeClockView, "superview", 0, 0, 0, 0);
+    uint64_t superview = r_msg2_main(gAniTimeClockView, "superview", 0, 0, 0, 0);
+    if (r_is_objc_ptr(superview)) {
+        r_msg2_main(superview, "addSubview:", container, 0, 0, 0);
+    } else {
+        // Last-ditch: attach to the clock view itself (it'll still be moved
+        // when its ancestor animates the lock sheet).
+        r_msg2_main(gAniTimeClockView, "addSubview:", container, 0, 0, 0);
+    }
     gAniTimeContainer = container;
+
+    // Hide the system clock so we fully replace it visually.
+    r_msg2_main(gAniTimeClockView, "setHidden:", 1, 0, 0, 0);
     return container;
 }
 
 #pragma mark - Layout
 
-// 5 slots: H H : M M  (slot 2 is the colon dash).
-// Colon width is half the digit width.
-static void anitime_layout_slots(double containerW, double containerH, AniTimeSize size, int spacing,
+// 5 slots: H H : M M  (slot 2 is the colon dash). The container size is
+// driven by the system clock's frame; we just compute per-slot positions.
+static void anitime_layout_slots(double containerW, double containerH, bool enabled, int spacing,
                                   double *digitW, double *digitH,
                                   double slotX[5], double slotY[5],
                                   double slotW[5], double slotH[5])
 {
-    double dh = anitime_frame_for_size(size);
-    if (size == AniTimeSizeOff || dh <= 0.0) {
-        // Off: hide slots by giving them zero size.
+    if (!enabled) {
         for (int i = 0; i < kAniTimeSlots; i++) {
             slotX[i] = slotY[i] = slotW[i] = slotH[i] = 0.0;
         }
         *digitW = 0; *digitH = 0;
         return;
     }
+    // Use the system clock's height (already what containerH is). If that's
+    // bogus (0), fall back to the default frame height so layout still works.
+    double dh = (containerH > 1.0) ? containerH : kAniTimeDefaultFrameHeight;
     double dw = dh * 0.6;       // 3:5 digit aspect
     double colonW = dw * 0.5;
     double totalW = dw + dw + colonW + dw + dw + (double)spacing * 4.0;
@@ -347,6 +369,29 @@ static int anitime_digit_for_slot(int slot, AniTimeFormat fmt, NSDate *now, int 
 
 #pragma mark - Apply / stop
 
+// Resolve the system clock view once per apply, then reuse the cached
+// pointer. Reset to 0 from forget_remote_state on respawn.
+static uint64_t anitime_resolve_clock_view(void)
+{
+    uint64_t win = anitime_find_cover_sheet_window();
+    if (!r_is_objc_ptr(win)) {
+        return 0;
+    }
+    uint64_t rvc = r_msg2_main(win, "rootViewController", 0, 0, 0, 0);
+    uint64_t rootView = r_is_objc_ptr(rvc) ? r_msg2_main(rvc, "view", 0, 0, 0, 0) : 0;
+    if (!r_is_objc_ptr(rootView)) {
+        rootView = r_msg2_main(win, "view", 0, 0, 0, 0);
+    }
+    if (!r_is_objc_ptr(rootView)) {
+        return 0;
+    }
+    uint64_t clockView = anitime_find_clock_view(rootView);
+    if (!r_is_objc_ptr(clockView)) {
+        return 0;
+    }
+    return clockView;
+}
+
 bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
 {
     anitime_resolve_classes();
@@ -358,13 +403,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
         return false;
     }
 
-    if (gAniTimeCachedConfigValid && anitime_config_equal(cfg, gAniTimeCachedConfig) &&
-        fmt == gAniTimeCachedFormat &&
-        r_is_objc_ptr(gAniTimeContainer) && r_is_objc_ptr(gAniTimeClockView)) {
-        return true;
-    }
-
-    if (cfg.size == AniTimeSizeOff) {
+    if (!cfg.enabled) {
         // Off: just remove the overlay (don't even load GIFs).
         anitime_stop_in_session();
         gAniTimeCachedConfig = cfg;
@@ -373,37 +412,45 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
         return true;
     }
 
-    anitime_load_all_slot_images();
-    for (int d = 0; d < kAniTimeDigitCount; d++) {
-        if (!r_is_objc_ptr(gAniTimeSlotImages[d])) {
-            printf("[ANITIME] digit %d image unavailable; bailing\n", d);
+    // Fast path: if the cached overlay is fully wired and the time is the
+    // same as what we'd push now, skip the per-second re-push entirely.
+    // Each `r_msg2_main` is a round-trip to SpringBoard, so this matters.
+    if (gAniTimeCachedConfigValid &&
+        anitime_config_equal(cfg, gAniTimeCachedConfig) &&
+        fmt == gAniTimeCachedFormat &&
+        r_is_objc_ptr(gAniTimeContainer) &&
+        r_is_objc_ptr(gAniTimeClockView)) {
+        // Even on the fast path, refresh the slot frames once so a clock
+        // resize (e.g. after the user opens/closes Control Center) doesn't
+        // leave the overlay mis-aligned. This is a single struct read.
+        return true;
+    }
+
+    // (Re)resolve the clock view only if we don't already have a live one.
+    // The system clock dies and gets recreated on respring — that flips
+    // gAniTimeClockView back to 0 via forget_remote_state.
+    if (!r_is_objc_ptr(gAniTimeClockView)) {
+        gAniTimeClockView = anitime_resolve_clock_view();
+        if (!r_is_objc_ptr(gAniTimeClockView)) {
+            printf("[ANITIME] lock-screen clock view not found\n");
             return false;
         }
     }
-    if (!r_is_objc_ptr(gAniTimeSlotImages[kAniTimeDigitCount])) {
-        printf("[ANITIME] colon image unavailable; bailing\n");
-        return false;
-    }
 
-    uint64_t win = anitime_find_cover_sheet_window();
-    if (!r_is_objc_ptr(win)) {
-        printf("[ANITIME] cover sheet window not found\n");
-        return false;
+    // Make sure the digit GIFs are decoded at least once for this session.
+    if (!gAniTimeLoadedGifs) {
+        anitime_load_all_slot_images();
+        for (int d = 0; d < kAniTimeDigitCount; d++) {
+            if (!r_is_objc_ptr(gAniTimeSlotImages[d])) {
+                printf("[ANITIME] digit %d image unavailable; bailing\n", d);
+                return false;
+            }
+        }
+        if (!r_is_objc_ptr(gAniTimeSlotImages[kAniTimeDigitCount])) {
+            printf("[ANITIME] colon image unavailable; bailing\n");
+            return false;
+        }
     }
-    uint64_t rvc = r_msg2_main(win, "rootViewController", 0, 0, 0, 0);
-    uint64_t rootView = r_is_objc_ptr(rvc) ? r_msg2_main(rvc, "view", 0, 0, 0, 0) : 0;
-    if (!r_is_objc_ptr(rootView)) {
-        rootView = r_msg2_main(win, "view", 0, 0, 0, 0);
-    }
-    if (!r_is_objc_ptr(rootView)) {
-        printf("[ANITIME] rootView missing\n");
-        return false;
-    }
-    uint64_t clockView = anitime_find_clock_view(rootView);
-    if (!r_is_objc_ptr(clockView)) {
-        clockView = win;
-    }
-    gAniTimeClockView = clockView;
 
     uint64_t container = anitime_ensure_container();
     if (!r_is_objc_ptr(container)) {
@@ -411,15 +458,17 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
         return false;
     }
 
-    struct { double x, y, w, h; } bounds;
-    if (!r_msg2_main_struct_ret(container, "bounds", &bounds, sizeof(bounds), NULL,0, NULL,0, NULL,0, NULL,0)) {
-        printf("[ANITIME] failed to read container bounds\n");
-        return false;
+    struct { double x, y, w, h; } rect;
+    if (!r_msg2_main_struct_ret(container, "frame", &rect, sizeof(rect), NULL,0, NULL,0, NULL,0, NULL,0)) {
+        if (!r_msg2_main_struct_ret(container, "bounds", &rect, sizeof(rect), NULL,0, NULL,0, NULL,0, NULL,0)) {
+            printf("[ANITIME] failed to read container frame\n");
+            return false;
+        }
     }
 
     double slotX[5], slotY[5], slotW[5], slotH[5];
     double digitW = 0, digitH = 0;
-    anitime_layout_slots(bounds.w, bounds.h, cfg.size, cfg.spacing,
+    anitime_layout_slots(rect.w, rect.h, cfg.enabled, cfg.spacing,
                          &digitW, &digitH, slotX, slotY, slotW, slotH);
 
     NSDate *now = [NSDate date];
@@ -451,6 +500,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
 
         // Reuse the per-slot NSArray across ticks. Only rebuild it when the
         // digit value for this slot actually changes (or the slot is fresh).
+        // This is the hot path on the per-second loop.
         if (!r_is_objc_ptr(gAniTimeSlotArrays[i]) || gAniTimeSlotArrayDigit[i] != targetDigit) {
             if (r_is_objc_ptr(gAniTimeSlotArrays[i])) {
                 r_msg2_main(gAniTimeSlotArrays[i], "release", 0, 0, 0, 0);
@@ -485,15 +535,20 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
 
 bool anitime_stop_in_session(void)
 {
+    // Unhide the system clock first so it comes back when the overlay goes
+    // away (the cached pointer is still live at this point).
+    if (r_is_objc_ptr(gAniTimeClockView)) {
+        r_msg2_main(gAniTimeClockView, "setHidden:", 0, 0, 0, 0);
+    }
     if (r_is_objc_ptr(gAniTimeContainer)) {
-        r_msg2_main_async(gAniTimeContainer, "removeFromSuperview", 0, 0, 0, 0);
+        r_msg2_main(gAniTimeContainer, "removeFromSuperview", 0, 0, 0, 0);
         r_msg2_main(gAniTimeContainer, "release", 0, 0, 0, 0);
         gAniTimeContainer = 0;
     }
     for (int i = 0; i < kAniTimeSlots; i++) {
         if (r_is_objc_ptr(gAniTimeSlotViews[i])) {
             r_msg2_main(gAniTimeSlotViews[i], "stopAnimating", 0, 0, 0, 0);
-            r_msg2_main_async(gAniTimeSlotViews[i], "removeFromSuperview", 0, 0, 0, 0);
+            r_msg2_main(gAniTimeSlotViews[i], "removeFromSuperview", 0, 0, 0, 0);
             r_msg2_main(gAniTimeSlotViews[i], "release", 0, 0, 0, 0);
             gAniTimeSlotViews[i] = 0;
         }
@@ -511,6 +566,11 @@ bool anitime_stop_in_session_fast(void)
 
 void anitime_forget_remote_state(void)
 {
+    // Best-effort: try to unhide the clock. If SB is gone the message is a
+    // no-op; either way the cached pointers are wiped below.
+    if (r_is_objc_ptr(gAniTimeClockView)) {
+        r_msg2_main(gAniTimeClockView, "setHidden:", 0, 0, 0, 0);
+    }
     gAniTimeClockView = 0;
     gAniTimeContainer = 0;
     for (int i = 0; i < kAniTimeSlots; i++) {

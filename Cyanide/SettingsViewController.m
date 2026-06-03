@@ -49,6 +49,8 @@
 #import <sys/utsname.h>
 #import <time.h>
 #import <unistd.h>
+#import <ImageIO/ImageIO.h>
+#import <MobileCoreServices/MobileCoreServices.h>
 
 @interface DSRespringOverlayView : UIView
 @property (nonatomic, strong) WKWebView *webView;
@@ -235,7 +237,6 @@ NSString * const kSettingsNSBarEnabled = @"NSBarEnabled";
 NSString * const kSettingsNSBarPosition = @"NSBarPosition";
 
 NSString * const kSettingsAniTimeEnabled      = @"AniTimeEnabled";
-NSString * const kSettingsAniTimeSize          = @"AniTimeSize";
 NSString * const kSettingsAniTimeSpacing       = @"AniTimeSpacing";
 NSString * const kSettingsAniTimeFormat        = @"AniTimeFormat";
 
@@ -3554,7 +3555,6 @@ static BOOL settings_key_is_gravitylite(NSString *key)
 static BOOL settings_key_is_anitime(NSString *key)
 {
     return [key isEqualToString:kSettingsAniTimeEnabled] ||
-           [key isEqualToString:kSettingsAniTimeSize] ||
            [key isEqualToString:kSettingsAniTimeSpacing] ||
            [key isEqualToString:kSettingsAniTimeFormat];
 }
@@ -4197,7 +4197,6 @@ void settings_register_defaults(void)
         kSettingsNSBarPosition: @0,
 
         kSettingsAniTimeEnabled:     @NO,
-        kSettingsAniTimeSize:         @1,    // Compact
         kSettingsAniTimeSpacing:      @4,
         kSettingsAniTimeFormat:       @0,    // 12h
 
@@ -5745,17 +5744,43 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     ];
 }
 
-#pragma mark - AniTime rows (d1y)
+#pragma mark - AniTime rows (by extra)
+
+// Decode every frame of a GIF via ImageIO so the preview UIImageView can
+// play the whole loop. +[UIImage imageWithData:] only returns the first
+// frame, which made the preview look static.
++ (NSArray<UIImage *> *)anitimeGifFramesFromData:(NSData *)data
+{
+    if (data.length == 0) return @[];
+    CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    if (!src) return @[];
+    size_t count = CGImageSourceGetCount(src);
+    NSMutableArray<UIImage *> *out = [NSMutableArray arrayWithCapacity:count];
+    for (size_t i = 0; i < count; i++) {
+        CGImageRef img = CGImageSourceCreateImageAtIndex(src, i, NULL);
+        if (!img) continue;
+        UIImage *ui = [UIImage imageWithCGImage:img scale:UIScreen.mainScreen.scale orientation:UIImageOrientationUp];
+        CGImageRelease(img);
+        if (ui) [out addObject:ui];
+    }
+    CFRelease(src);
+    return out;
+}
 
 - (NSArray<NSDictionary *> *)anitimeRows
 {
-    NSArray<NSString *> *sizes   = @[ @"Off", @"Compact" ];
     NSArray<NSString *> *formats = @[ @"12-hour", @"24-hour" ];
     return @[
+        // Live preview: animates a fixed HH:MM sample (1 2 : 3 4) so the user
+        // can see the digit GIFs playing right at the top of the section.
         @{ @"kind": @"anitime-preview" },
+
+        // Single on/off control. Tweak by extra: Spacing + Format apply when
+        // the overlay is active; the actual show/hide is done by the buttons
+        // below (which also flip the same key).
         @{ @"kind": @"toggle",
-           @"key": kSettingsAniTimeSize,
-           @"title": @"Size" },
+           @"key": kSettingsAniTimeEnabled,
+           @"title": @"Enabled" },
         @{ @"kind": @"slider",
            @"key": kSettingsAniTimeSpacing,
            @"title": @"Spacing",
@@ -6751,7 +6776,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     });
 }
 
-#pragma mark - AniTime (d1y) helpers
+#pragma mark - AniTime (by extra) helpers
 
 - (void)applyAniTimeNow
 {
@@ -7936,7 +7961,9 @@ void cyanide_present_contact(UIViewController *host)
         stack.spacing = 4.0;
 
         // Five slots: 1, 2, dash, 3, 4 — fixed demo so the preview is always
-        // recognisable regardless of the wall clock.
+        // recognisable regardless of the wall clock. We extract every GIF
+        // frame via CGImageSource so animationImages plays the whole loop,
+        // not just the first frame (which is what +imageWithData: gives).
         NSArray<NSString *> *demoNames = @[ @"1", @"2", @"dash", @"3", @"4" ];
         for (NSString *name in demoNames) {
             UIImageView *iv = [[UIImageView alloc] init];
@@ -7945,10 +7972,10 @@ void cyanide_present_contact(UIViewController *host)
             NSString *path = [[NSBundle mainBundle] pathForResource:name ofType:@"gif"];
             NSData *bytes = path ? [NSData dataWithContentsOfFile:path] : nil;
             if (bytes.length > 0) {
-                UIImage *img = [UIImage imageWithData:bytes];
-                if (img) {
-                    iv.image = img;
-                    iv.animationImages = @[ img ];
+                NSArray<UIImage *> *frames = [self.class anitimeGifFramesFromData:bytes];
+                if (frames.count > 0) {
+                    iv.image = frames.firstObject;
+                    iv.animationImages = frames;
                     iv.animationDuration = 1.0;
                     iv.animationRepeatCount = 0;
                     [iv startAnimating];

@@ -83,9 +83,8 @@ extern NSString * const kSettingsNiceBarLiteSlotWeatherText[5];
 extern NSString * const kSettingsNSBarEnabled;
 extern NSString * const kSettingsNSBarPosition;  // 0..4 (top-left, bottom-left, top-right, bottom-right, center)
 
-// AniTime (d1y): animated GIF digits on the lock-screen clock.
+// AniTime (by extra): animated GIF digits on the lock-screen clock.
 extern NSString * const kSettingsAniTimeEnabled;       // master toggle (Activate button)
-extern NSString * const kSettingsAniTimeSize;           // 0=Off, 1=Compact
 extern NSString * const kSettingsAniTimeSpacing;        // 0..16 pt
 extern NSString * const kSettingsAniTimeFormat;         // 0=12h, 1=24h
 
