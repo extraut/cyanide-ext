@@ -28,6 +28,7 @@ static uint64_t g_livewp_looper = 0;
 static uint64_t g_livewp_home_window = 0;
 static uint64_t g_livewp_lock_window = 0;
 static bool g_livewp_configured = false;
+static id g_livewp_loop_observer = nil;        // AVPlayerItem.didPlayToEndTime observer — drives seamless loop
  
 typedef struct { double x, y, w, h; } LiveWPRect;
  
@@ -74,6 +75,14 @@ bool livewp_apply_in_session(void)
     if (g_livewp_configured) {
         livewp_stop_in_session();
         usleep(100000);
+    } else if (g_livewp_loop_observer) {
+        // Defensive: if a previous run left the loop observer around
+        // (e.g. crash recovery, hot reload), tear it down before we
+        // register a fresh one. livewp_stop_in_session would normally
+        // do this through livewp_cleanup, but g_livewp_configured may
+        // already be false in some error paths.
+        [[NSNotificationCenter defaultCenter] removeObserver:g_livewp_loop_observer];
+        g_livewp_loop_observer = nil;
     }
  
     if (!livewp_create_player(videoPath)) return false;
@@ -203,6 +212,10 @@ bool livewp_swap_video_in_session(NSString *videoPath)
  
 void livewp_forget_remote_state(void)
 {
+    if (g_livewp_loop_observer) {
+        [[NSNotificationCenter defaultCenter] removeObserver:g_livewp_loop_observer];
+        g_livewp_loop_observer = nil;
+    }
     g_livewp_player = 0;
     g_livewp_home_layer = 0;
     g_livewp_lock_layer = 0;
@@ -264,6 +277,34 @@ static bool livewp_create_player(NSString *videoPath)
     //      0 = AVPlayerActionAtItemEndAdvanceToNextItem — causes AVQueuePlayer
     //      to attempt advancing an empty queue, stopping playback entirely.
     r_msg2_main(player, "setActionAtItemEnd:", (uint64_t)1 /* AVPlayerActionAtItemEndPause */, 0, 0, 0);
+
+    // Seamless loop: observe AVPlayerItemDidPlayToEndTimeNotification on
+    // the playerItem. When the item reaches its end, seek back to zero
+    // and play. This is the softest possible loop driver — driven by
+    // AVFoundation's own notification, no periodic timer, no layer tree
+    // mutation, no extra r_msg2 round-trips per loop. The observer is
+    // torn down in livewp_cleanup and livewp_forget_remote_state.
+    {
+        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+        if (nc) {
+            uint64_t playerForObs = player;
+            g_livewp_loop_observer = [nc addObserverForName:@"AVPlayerItemDidPlayToEndTimeNotification"
+                                                     object:(__bridge id)(void *)playerItem
+                                                      queue:nil
+                                                 usingBlock:^(NSNotification * _Nonnull note) {
+                (void)note;
+                // Use the player reference captured at observer-registration
+                // time, not the live g_livewp_player global. If the user
+                // hot-swap videos via livewp_swap_video_in_session the
+                // global may have moved on; the original player is still
+                // the one whose item just finished and wants to rewind.
+                struct { long long v; long long ts; } zero = {0, 0};
+                r_msg2_main_raw(playerForObs, "seekToTime:",
+                                &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
+                r_msg2_main(playerForObs, "play", 0, 0, 0, 0);
+            }];
+        }
+    }
  
     // 两个 layer：一个给主屏幕，一个给锁屏
     uint64_t homeLayer = livewp_make_layer(player);
@@ -308,19 +349,23 @@ static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool 
     if (curSuper != winLayer) {
         if (r_is_objc_ptr(curSuper))
             r_msg2_main(layer, "removeFromSuperlayer", 0, 0, 0, 0);
-        // Insert at index 1: above the background wallpaper layer (always
-        // at index 0) but below SBIconView and the rest of the content.
-        // The previous atIndex:0 placed us underneath the wallpaper, so
-        // the stock wallpaper rendered on top during lockscreen pull-down
-        // and the home-screen "icons disappear after unlock" flash was
-        // caused by the layer being reattached at the very top of the
-        // stack on every window transition. UIWindow siblings are still
-        // ordered by UIScreen, so this only affects the content inside
-        // SBCoverSheetWindow / SBHomeScreenWindow.
+        // Insert at index 0: bottom of the sublayer stack. On iOS 26 the
+        // SBHomeScreenWindow / SBCoverSheetWindow CALayer sublayers are
+        // ordered with content (SBIconView, SBLockScreenView, status bar
+        // overlays) on top and the stock background wallpaper further
+        // down. atIndex:0 puts our AVPlayerLayer at the very bottom of
+        // the stack — underneath everything the user actually sees,
+        // including the stock wallpaper. Since the user-picked video is
+        // opaque and aspect-fill, it covers the stock wallpaper
+        // completely in the visible region. The previous atIndex:1
+        // placed us above the stock wallpaper but still above the icon
+        // content layers' private sublayers on iOS 26, which is why the
+        // video rendered on top of the icons.
         uint64_t sublayers = r_msg2_main(winLayer, "sublayers", 0, 0, 0, 0);
         uint64_t sublayerCount = r_is_objc_ptr(sublayers)
             ? r_msg2_main(sublayers, "count", 0, 0, 0, 0) : 0;
-        uint64_t insertIdx = (sublayerCount >= 1) ? 1 : 0;
+        (void)sublayerCount;
+        uint64_t insertIdx = 0;
         r_msg2_main(winLayer, "insertSublayer:atIndex:",
                     layer, insertIdx, 0, 0);
         if (movedOut) *movedOut = true;
@@ -405,6 +450,10 @@ static bool livewp_attach_and_play(void)
  
 static void livewp_cleanup(void)
 {
+    if (g_livewp_loop_observer) {
+        [[NSNotificationCenter defaultCenter] removeObserver:g_livewp_loop_observer];
+        g_livewp_loop_observer = nil;
+    }
     g_livewp_player = 0;
     g_livewp_player_item = 0;
     g_livewp_home_layer = 0;
