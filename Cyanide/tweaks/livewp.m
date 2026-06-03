@@ -467,8 +467,9 @@ static void livewp_stop_repair_timer(void)
     dispatch_source_t src = g_livewp_repair_source;
     g_livewp_repair_source = NULL;
     if (!src) return;
+    // ARC owns the source: cancel + drop our strong reference. The
+    // event handler block holds a retain on its captured `g_livewp_*`
+    // globals, which ARC releases when the source deallocates after
+    // cancel drains the queue.
     dispatch_source_cancel(src);
-    // dispatch_source_cancel only marks the source; release after it has
-    // been resumed so the dispatch object is balanced.
-    dispatch_release(src);
 }
