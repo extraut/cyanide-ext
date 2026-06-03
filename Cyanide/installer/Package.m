@@ -74,10 +74,7 @@
 - (BOOL)isInstallDisabled
 {
     if (self.installDisabledReason.length > 0) return YES;
-    if (self.experimental) {
-        BOOL experimentalOn = [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsExperimentalTweaksEnabled];
-        if (!experimentalOn || !(cyanide_is_patron() || cyanide_is_creator())) return YES;
-    }
+    // Experimental tweaks ship to everyone in this build. No Patreon gate.
     if (self.creatorOnly && !cyanide_is_creator()) return YES;
     return NO;
 }

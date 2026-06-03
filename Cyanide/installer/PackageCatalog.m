@@ -29,16 +29,13 @@ static const NSInteger kSecNSBar            = 19;
 + (NSArray<Package *> *)allPackages
 {
     NSArray<Package *> *full = [self allPackagesIncludingExperimental];
+    // Experimental tweaks ship in the public build. No Patreon gate here —
+    // the per-package gating logic has been simplified to creator-only.
     BOOL creator = cyanide_is_creator();
-    BOOL experimentalAccess = cyanide_is_patron() || creator;
-    BOOL experimentalOn = [[NSUserDefaults standardUserDefaults]
-                            boolForKey:kSettingsExperimentalTweaksEnabled]
-                            && experimentalAccess;
 
     NSMutableArray<Package *> *out = [NSMutableArray arrayWithCapacity:full.count];
     for (Package *p in full) {
         if (p.creatorOnly && !creator) continue;
-        if (p.experimental && !experimentalOn) continue;
         [out addObject:p];
     }
     return out;

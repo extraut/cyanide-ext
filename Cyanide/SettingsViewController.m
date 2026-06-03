@@ -767,25 +767,29 @@ static NSUInteger settings_live_failure_limit(NSUInteger foregroundLimit)
     return (g_app_in_background != 0 || g_screen_awake == 0) ? 1 : foregroundLimit;
 }
 
+// Experimental tweaks are part of the public build now. No Patreon gate:
+// if the package is marked experimental in PackageCatalog.m, it shows up
+// in the Installer for everyone. The per-package install-disable helpers
+// below are kept as a single no-op predicate so call sites don't need
+// to be rewritten.
 static BOOL settings_experimental_access_allowed(void)
 {
-    return cyanide_is_patron() || cyanide_is_creator();
+    return YES;
 }
 
 static BOOL settings_experimental_tweaks_enabled(void)
 {
-    return settings_experimental_access_allowed() &&
-           [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsExperimentalTweaksEnabled];
+    return YES;
 }
 
 static BOOL settings_rssi_install_allowed(void)
 {
-    return settings_experimental_tweaks_enabled();
+    return YES;
 }
 
 static BOOL settings_location_sim_install_allowed(void)
 {
-    return settings_experimental_tweaks_enabled();
+    return YES;
 }
 
 static BOOL settings_read_screen_awake(void)
@@ -4051,39 +4055,15 @@ void settings_register_defaults(void)
         kSettingsThemerCustomThemePath: @"",
         kSettingsThemerCustomThemeName: @"",
 
-        kSettingsExperimentalTweaksEnabled: @NO,
+        kSettingsExperimentalTweaksEnabled: @YES,
 
         kSettingsNanoMaxPairing:       @(kNanoDefaultMaxPairing),
         kSettingsNanoMinPairing:       @(kNanoDefaultMinPairing),
         kSettingsNanoMinPairingChipID: @(kNanoDefaultMinPairingChipID),
         kSettingsNanoMinQuickSwitch:   @(kNanoDefaultMinQuickSwitch),
     }];
-    if (!settings_experimental_access_allowed()) {
-        if ([defaults boolForKey:kSettingsExperimentalTweaksEnabled]) {
-            [defaults setBool:NO forKey:kSettingsExperimentalTweaksEnabled];
-        }
-        if ([defaults boolForKey:kSettingsRSSIDisplayEnabled]) {
-            [defaults setBool:NO forKey:kSettingsRSSIDisplayEnabled];
-        }
-        if ([defaults boolForKey:kSettingsTypeBannerEnabled]) {
-            [defaults setBool:NO forKey:kSettingsTypeBannerEnabled];
-        }
-        if ([defaults boolForKey:kSettingsLocationSimEnabled]) {
-            [defaults setBool:NO forKey:kSettingsLocationSimEnabled];
-        }
-        [defaults synchronize];
-    } else if (![defaults boolForKey:kSettingsExperimentalTweaksEnabled]) {
-        BOOL changed = NO;
-        if ([defaults boolForKey:kSettingsRSSIDisplayEnabled]) {
-            [defaults setBool:NO forKey:kSettingsRSSIDisplayEnabled];
-            changed = YES;
-        }
-        if ([defaults boolForKey:kSettingsLocationSimEnabled]) {
-            [defaults setBool:NO forKey:kSettingsLocationSimEnabled];
-            changed = YES;
-        }
-        if (changed) [defaults synchronize];
-    }
+    // Experimental tweaks are part of the public build now. No Patreon gate
+    // is applied here — users keep whatever toggles they had on first launch.
     if ([defaults boolForKey:kSettingsThemerEnabled] &&
         !settings_themer_has_selected_theme()) {
         [defaults setBool:NO forKey:kSettingsThemerEnabled];
@@ -5796,7 +5776,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case RootSectionInDev:         return (NSInteger)self.inDevBundleRows.count;
         case RootSectionSystemBundles:  return (NSInteger)self.systemBundleRows.count;
         case RootSectionPatreon:        return 0;
-        case RootSectionExperimental:   return 1;
+        case RootSectionExperimental:   return 0;
         case RootSectionAbout:          return 6;
         case RootSectionCount:          return 0;
     }
@@ -5812,7 +5792,6 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case RootSectionTweakBundles:   return self.tweakBundleRows.count   > 0 ? @"Tweaks" : nil;
         case RootSectionInDev:         return self.inDevBundleRows.count   > 0 ? @"In Development" : nil;
         case RootSectionSystemBundles:  return self.systemBundleRows.count  > 0 ? @"System" : nil;
-        case RootSectionExperimental:   return @"Experimental";
         case RootSectionAbout:          return @"About";
         default:                        return nil;
     }
@@ -7408,8 +7387,6 @@ void cyanide_present_contact(UIViewController *host)
                 return [self buildInDevCellWithRow:self.inDevBundleRows[indexPath.row] tableView:tableView];
             case RootSectionSystemBundles:
                 return [self buildBundleCellWithRow:self.systemBundleRows[indexPath.row] tableView:tableView];
-            case RootSectionExperimental:
-                return [self buildExperimentalCellInTableView:tableView];
             case RootSectionAbout:
                 return [self buildAboutCellAtRow:indexPath.row tableView:tableView];
             case RootSectionCount:
@@ -8259,15 +8236,6 @@ void cyanide_present_contact(UIViewController *host)
                 SettingsViewController *detail = [[SettingsViewController alloc] initWithUnderlyingSection:underlying
                                                                                               bundleTitle:pushTitle];
                 [self.navigationController pushViewController:detail animated:YES];
-                return;
-            }
-            case RootSectionExperimental: {
-                UITableViewCell *expCell = [tableView cellForRowAtIndexPath:indexPath];
-                if ([expCell.accessoryView isKindOfClass:[UISwitch class]]) {
-                    UISwitch *sw = (UISwitch *)expCell.accessoryView;
-                    [sw setOn:!sw.isOn animated:YES];
-                    [self experimentalSwitchChanged:sw];
-                }
                 return;
             }
             case RootSectionAbout: {
