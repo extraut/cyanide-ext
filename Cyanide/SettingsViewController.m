@@ -25,6 +25,7 @@
 #import "tweaks/livewp.h"
 #import "tweaks/nicebarlite.h"
 #import "tweaks/nsbar.h"
+#import "tweaks/anitime.h"
 #import <CoreMotion/CoreMotion.h>
 #import <PhotosUI/PhotosUI.h>
 
@@ -233,6 +234,12 @@ NSString * const kSettingsNiceBarLiteSlotWeatherText[5] = {
 NSString * const kSettingsNSBarEnabled = @"NSBarEnabled";
 NSString * const kSettingsNSBarPosition = @"NSBarPosition";
 
+NSString * const kSettingsAniTimeEnabled      = @"AniTimeEnabled";
+NSString * const kSettingsAniTimeSize          = @"AniTimeSize";
+NSString * const kSettingsAniTimeSpacing       = @"AniTimeSpacing";
+NSString * const kSettingsAniTimeFormat24h     = @"AniTimeFormat24h";
+NSString * const kSettingsAniTimeShowSeconds   = @"AniTimeShowSeconds";
+
 NSString * const kSettingsLocationSimEnabled = @"LocationSimEnabled";
 NSString * const kSettingsLocationSimLatitude = @"LocationSimLatitude";
 NSString * const kSettingsLocationSimLongitude = @"LocationSimLongitude";
@@ -293,6 +300,8 @@ static volatile int g_axonlite_live_running = 0;
 static volatile int g_axonlite_live_stop_requested = 0;
 static volatile int g_typebanner_live_running = 0;
 static volatile int g_typebanner_live_stop_requested = 0;
+static volatile int g_anitime_live_running = 0;
+static volatile int g_anitime_live_stop_requested = 0;
 static volatile int g_gravitylite_background_armed = 0;
 static volatile int g_gravitylite_start_worker_running = 0;
 static volatile int g_gravity_motion_stop_requested = 1;
@@ -481,6 +490,12 @@ static bool settings_stop_nsbar_registered(BOOL springboardWillDie)
     return nsbar_stop_in_session();
 }
 
+static bool settings_stop_anitime_registered(BOOL springboardWillDie)
+{
+    return springboardWillDie ? anitime_stop_in_session_fast()
+                              : anitime_stop_in_session();
+}
+
 static void settings_each_springboard_cleanup_entry(void (^block)(const SettingsSpringBoardTweakCleanupEntry *entry))
 {
     if (!block) return;
@@ -497,6 +512,7 @@ static void settings_each_springboard_cleanup_entry(void (^block)(const Settings
         { kSettingsLiveWPEnabled, "LiveWP", NULL, settings_stop_livewp_registered, livewp_forget_remote_state, NULL, YES, YES },
         { kSettingsNiceBarLiteEnabled, "NiceBar Lite", NULL, settings_stop_nicebarlite_registered, nicebarlite_forget_remote_state, NULL, YES, YES },
         { kSettingsNSBarEnabled, "NSBar", NULL, settings_stop_nsbar_registered, nsbar_forget_remote_state, NULL, YES, YES },
+        { kSettingsAniTimeEnabled, "AniTime", NULL, settings_stop_anitime_registered, anitime_forget_remote_state, NULL, YES, YES },
         { nil, "Kill All Apps", NULL, NULL, killallapps_forget_remote_state, NULL, NO, NO },
     };
     size_t count = sizeof(entries) / sizeof(entries[0]);
@@ -737,6 +753,8 @@ static void settings_start_typebanner_live_loop(void);
 static void settings_start_themer_live_loop(void);
 static void settings_schedule_themer_repair_burst(const char *reason);
 static void settings_schedule_themer_quiet_repair_burst(const char *reason);
+static void settings_start_anitime_per_second_loop(void);
+static void settings_end_anitime_per_second_loop(const char *reason);
 static void settings_notify_remote_call_state_changed(void);
 static void settings_request_all_live_loops_stop(const char *reason);
 
@@ -1248,6 +1266,7 @@ static void settings_request_all_live_loops_stop(const char *reason)
     settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
         if (entry->requestStop) entry->requestStop();
     });
+    g_anitime_live_stop_requested = 1;
     if (reason) {
         printf("[SETTINGS] requested all live RemoteCall loops stop: %s\n", reason);
     }
@@ -2660,6 +2679,76 @@ static void settings_apply_statbar_once_async(const char *reason)
     });
 }
 
+#pragma mark - AniTime per-second loop
+//
+// Runs in the Cyanide process. Every second, if the lock-screen is reachable
+// and the master toggle is on, re-pushes the current time as a digit set into
+// SpringBoard. Bails when the screen is asleep, the SB session is gone, or
+// the user disables the tweak. `g_anitime_live_stop_requested` is the
+// interrupt flag flipped by `settings_end_anitime_per_second_loop` and by the
+// pre-respring cleanup.
+
+static const useconds_t kAniTimeLiveIntervalUS = 1000000; // 1 Hz
+
+static void settings_end_anitime_per_second_loop(const char *reason)
+{
+    if (reason) {
+        printf("[SETTINGS] AniTime live loop stop requested: %s\n", reason);
+    }
+    g_anitime_live_stop_requested = 1;
+}
+
+static void settings_start_anitime_per_second_loop(void)
+{
+    if (!settings_device_supported()) return;
+    if (settings_cleanup_in_progress()) return;
+
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (![d boolForKey:kSettingsAniTimeEnabled]) return;
+    if (!g_springboard_rc_ready) return;
+
+    if (__sync_lock_test_and_set(&g_anitime_live_running, 1)) {
+        return; // already running
+    }
+    if (settings_cleanup_in_progress()) {
+        __sync_lock_release(&g_anitime_live_running);
+        return;
+    }
+    g_anitime_live_stop_requested = 0;
+
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        @try {
+            while (!settings_cleanup_in_progress() &&
+                   !g_anitime_live_stop_requested &&
+                   [d boolForKey:kSettingsAniTimeEnabled] &&
+                   g_springboard_rc_ready) {
+                if (!settings_screen_awake_cached()) {
+                    settings_live_loop_sleep_interruptible(0, kAniTimeLiveIntervalUS,
+                                                           &g_anitime_live_stop_requested);
+                    continue;
+                }
+                @synchronized (settings_rc_lock()) {
+                    if (settings_cleanup_in_progress() ||
+                        !g_springboard_rc_ready ||
+                        ![d boolForKey:kSettingsAniTimeEnabled]) return;
+                    AniTimeConfig cfg = anitime_config_from_defaults();
+                    bool ok = anitime_apply_in_session(cfg);
+                    if (ok) {
+                        settings_mark_tweak_applied(kSettingsAniTimeEnabled, YES);
+                    }
+                }
+                settings_live_loop_sleep_interruptible(0, kAniTimeLiveIntervalUS,
+                                                       &g_anitime_live_stop_requested);
+            }
+        } @finally {
+            printf("[SETTINGS] AniTime live loop exited stop=%d enabled=%d\n",
+                   g_anitime_live_stop_requested,
+                   [d boolForKey:kSettingsAniTimeEnabled]);
+            __sync_lock_release(&g_anitime_live_running);
+        }
+    });
+}
+
 static void settings_start_rssi_live_loop(void)
 {
     if (!settings_device_supported()) return;
@@ -3462,6 +3551,15 @@ static BOOL settings_key_is_gravitylite(NSString *key)
            [key isEqualToString:kSettingsGravityLiteAngularResistancePct];
 }
 
+static BOOL settings_key_is_anitime(NSString *key)
+{
+    return [key isEqualToString:kSettingsAniTimeEnabled] ||
+           [key isEqualToString:kSettingsAniTimeSize] ||
+           [key isEqualToString:kSettingsAniTimeSpacing] ||
+           [key isEqualToString:kSettingsAniTimeFormat24h] ||
+           [key isEqualToString:kSettingsAniTimeShowSeconds];
+}
+
 static BOOL settings_key_is_location_sim(NSString *key)
 {
     return [key isEqualToString:kSettingsLocationSimEnabled] ||
@@ -3826,6 +3924,27 @@ static void settings_schedule_live_apply_for_key(NSString *key)
         return;
     }
 
+    if (settings_key_is_anitime(key)) {
+        if ([d boolForKey:kSettingsAniTimeEnabled] && g_springboard_rc_ready) {
+            // AniTime runs a per-second loop; that loop reads defaults every
+            // tick, so just nudging it (start if not running) is enough.
+            settings_start_anitime_per_second_loop();
+            settings_notify_package_queue_changed_async();
+        } else if (![d boolForKey:kSettingsAniTimeEnabled]) {
+            settings_end_anitime_per_second_loop("AniTime disabled");
+            settings_mark_tweak_applied(kSettingsAniTimeEnabled, NO);
+            settings_notify_package_queue_changed_async();
+            if (g_springboard_rc_ready) {
+                dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                    @synchronized (settings_rc_lock()) {
+                        if (g_springboard_rc_ready) anitime_stop_in_session();
+                    }
+                });
+            }
+        }
+        return;
+    }
+
     if (settings_key_is_axonlite(key)) {        if ([d boolForKey:kSettingsAxonLiteEnabled] && g_springboard_rc_ready) {
             dispatch_async(dispatch_get_global_queue(0, 0), ^{
                 if (!settings_axonlite_can_poll_springboard()) {
@@ -4080,6 +4199,12 @@ void settings_register_defaults(void)
         kSettingsNSBarEnabled:  @NO,
         kSettingsNSBarPosition: @0,
 
+        kSettingsAniTimeEnabled:     @YES,
+        kSettingsAniTimeSize:         @2,    // Normal
+        kSettingsAniTimeSpacing:      @4,
+        kSettingsAniTimeFormat24h:    @NO,   // 12h
+        kSettingsAniTimeShowSeconds:  @NO,
+
         kSettingsLocationSimEnabled: @NO,
         kSettingsLocationSimLatitude: @(kLocationSimDefaultLatitude),
         kSettingsLocationSimLongitude: @(kLocationSimDefaultLongitude),
@@ -4153,6 +4278,7 @@ static void settings_run_actions_internal(BOOL pendingOnly)
             BOOL liveWPEnabled = [d boolForKey:kSettingsLiveWPEnabled];
             BOOL niceBarLiteEnabled = [d boolForKey:kSettingsNiceBarLiteEnabled];
             BOOL nsBarEnabled = [d boolForKey:kSettingsNSBarEnabled];
+            BOOL anitimeEnabled = [d boolForKey:kSettingsAniTimeEnabled];
             BOOL runSBC = settings_enabled_tweak_should_run(d, kSettingsSBCEnabled, springBoardPendingOnly);
             BOOL runDarkTweaks = settings_dark_tweaks_should_run(d, springBoardPendingOnly);
             BOOL runStatBar = settings_enabled_tweak_should_run(d, kSettingsStatBarEnabled, springBoardPendingOnly);
@@ -4166,8 +4292,9 @@ static void settings_run_actions_internal(BOOL pendingOnly)
             BOOL runLiveWP = settings_enabled_tweak_should_run(d, kSettingsLiveWPEnabled, springBoardPendingOnly);
             BOOL runNiceBarLite = settings_enabled_tweak_should_run(d, kSettingsNiceBarLiteEnabled, springBoardPendingOnly);
             BOOL runNSBar = settings_enabled_tweak_should_run(d, kSettingsNSBarEnabled, springBoardPendingOnly);
+            BOOL runAniTime = settings_enabled_tweak_should_run(d, kSettingsAniTimeEnabled, springBoardPendingOnly);
             BOOL cleanupDisabledSpringBoardTweaks = settings_disabled_applied_springboard_cleanup_needed(d);
-            BOOL needsSpringBoardWork = runSBC || runDarkTweaks || runStatBar || runRSSI || runAxonLite || runGravityLite || runLayoutExtras || runTypeBanner || runThemer || runStageStrip || runLiveWP || runNiceBarLite || runNSBar || cleanupDisabledSpringBoardTweaks;
+            BOOL needsSpringBoardWork = runSBC || runDarkTweaks || runStatBar || runRSSI || runAxonLite || runGravityLite || runLayoutExtras || runTypeBanner || runThemer || runStageStrip || runLiveWP || runNiceBarLite || runNSBar || runAniTime || cleanupDisabledSpringBoardTweaks;
             BOOL runSandboxEscape = [d boolForKey:kSettingsRunSandboxEscape] && (!pendingOnly || needsSpringBoardWork);
             // TypeBanner prewarms its hidden SpringBoard window during Apply
             // and reuses the open SpringBoard session for text-only updates.
@@ -4191,6 +4318,7 @@ static void settings_run_actions_internal(BOOL pendingOnly)
             if (runLiveWP) total++;
             if (runNiceBarLite) total++;
             if (runNSBar) total++;
+            if (runAniTime) total++;
             if (cleanupDisabledSpringBoardTweaks) total++;
             NSUInteger step = 0;
 
@@ -4210,6 +4338,7 @@ static void settings_run_actions_internal(BOOL pendingOnly)
             if (runLiveWP) [enabledTweaks addObject:@"livewp"];
             if (runNiceBarLite) [enabledTweaks addObject:@"nicebarlite"];
             if (runNSBar) [enabledTweaks addObject:@"nsbar"];
+            if (runAniTime) [enabledTweaks addObject:@"anitime"];
             if (cleanupDisabledSpringBoardTweaks) [enabledTweaks addObject:@"cleanup"];
             if (forceSpringBoardRefresh) [enabledTweaks addObject:@"springboard-refresh"];
             log_user("[PLAN] %lu stages: %s\n",
@@ -4498,6 +4627,23 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                     } else if (!nsBarEnabled) {
                         nsbar_stop_in_session();
                     }
+
+                    if (runAniTime) {
+                        settings_progress(&step, total, "Starting AniTime lock-screen clock overlay");
+                        AniTimeConfig cfg = anitime_config_from_defaults();
+                        bool ok = anitime_apply_in_session(cfg);
+                        settings_mark_tweak_applied(kSettingsAniTimeEnabled,
+                                                    ok && [d boolForKey:kSettingsAniTimeEnabled]);
+                        printf("[SETTINGS] AniTime result=%d\n", ok);
+                        log_user("%s AniTime %s.\n",
+                                 ok ? "[OK]" : "[WARN]",
+                                 ok ? "digit overlay attached" : "did not start cleanly");
+                        cyanide_upload_log_milestone(ok ? @"anitime-initial-applied" : @"anitime-initial-failed");
+                        if (ok) settings_start_anitime_per_second_loop();
+                    } else if (!anitimeEnabled) {
+                        settings_end_anitime_per_second_loop("AniTime disabled at run");
+                        anitime_stop_in_session();
+                    }
                 }
 
                 if (runStatBar) {
@@ -4619,6 +4765,7 @@ typedef NS_ENUM(NSInteger, SettingsSection) {
     SectionLiveWP,
     SectionNiceBarLite,
     SectionNSBar,
+    SectionAniTime,
     SectionCount,
 };
 
@@ -5601,6 +5748,50 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     ];
 }
 
+#pragma mark - AniTime rows (d1y)
+
+- (NSArray<NSDictionary *> *)anitimeRows
+{
+    NSArray<NSString *> *sizes = @[ @"Small", @"Compact", @"Normal" ];
+    NSArray<NSString *> *formats = @[ @"12-hour", @"24-hour" ];
+    return @[
+        @{ @"kind": @"toggle",
+           @"key": kSettingsAniTimeEnabled,
+           @"title": @"Enable AniTime" },
+        @{ @"kind": @"segment",
+           @"key": kSettingsAniTimeSize,
+           @"title": @"Size",
+           @"options": sizes,
+           @"default": @2 },
+        @{ @"kind": @"slider",
+           @"key": kSettingsAniTimeSpacing,
+           @"title": @"Spacing",
+           @"min": @0,
+           @"max": @16,
+           @"step": @1,
+           @"unit": @"pt",
+           @"default": @4 },
+        @{ @"kind": @"segment",
+           @"key": kSettingsAniTimeFormat24h,
+           @"title": @"Format",
+           @"options": formats,
+           @"default": @0 },
+        @{ @"kind": @"toggle",
+           @"key": kSettingsAniTimeShowSeconds,
+           @"title": @"Show seconds" },
+        @{ @"kind": @"info",
+           @"title": @"GIFs",
+           @"subtitle": @"Bundled 0.gif–9.gif. Use the picker to swap to your own folder of digit GIFs." },
+        @{ @"kind": @"button",
+           @"title": @"Reapply AniTime",
+           @"action": @"anitime-apply" },
+        @{ @"kind": @"button",
+           @"title": @"Stop AniTime",
+           @"action": @"anitime-stop",
+           @"destructive": @YES },
+    ];
+}
+
 - (NSArray<NSDictionary *> *)themerRows
 {
     BOOL hasSelection = settings_themer_has_selected_theme();
@@ -5706,6 +5897,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case SectionLiveWP:      return self.livewpRows;
         case SectionNiceBarLite: return self.nicebarliteRows;
         case SectionNSBar:       return self.nsbarRows;
+        case SectionAniTime:     return self.anitimeRows;
         default: return @[];
     }
 }
@@ -5729,6 +5921,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         @{ @"title": @"Location Simulator", @"icon": @"location.fill",                       @"color": [UIColor systemGreenColor],  @"section": @(SectionLocationSim), @"experimental": @YES },
         @{ @"title": @"Cyanide Themer",     @"icon": @"paintpalette.fill",                   @"color": [UIColor systemPinkColor],   @"section": @(SectionThemer) },
         @{ @"title": @"Powercuff",          @"icon": @"bolt.slash.fill",                     @"color": [UIColor systemOrangeColor], @"section": @(SectionPowercuff) },
+        @{ @"title": @"AniTime",            @"icon": @"lock.fill",                           @"color": [UIColor systemTealColor],   @"section": @(SectionAniTime) },
         @{ @"title": @"SpringBoard Tweaks", @"icon": @"apps.iphone",                         @"color": [UIColor systemIndigoColor], @"section": @(SectionDarkSwordTweaks) },
         @{ @"title": @"Drag Coefficient",   @"icon": @"dial.medium.fill",                    @"color": [UIColor systemIndigoColor], @"section": @(SectionDragCoefficient) },
         @{ @"title": @"Home Layout Extras", @"icon": @"square.dashed.inset.filled",          @"color": [UIColor systemPurpleColor], @"section": @(SectionLayoutExtras) },
@@ -5901,6 +6094,12 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         return @"Note: Cyanide Themer is still rough around the edges and may be glitchy. It will be iteratively improved to be more stable over time.\n\n"
                @"Pick a theme before running Cyanide Themer.\n\n"
                @"Custom themes can be a folder of PNG files named by bundle ID, such as com.apple.mobilesafari.png, or a binary plist mapping bundle IDs to PNG data. Import copies the theme into Cyanide's Documents/Themes folder. Theme Format Guide includes examples and plist exports.";
+    }
+    if (s == SectionAniTime) {
+        return @"Replaces the four lock-screen clock digits with animated GIFs. Time is read from the device clock and refreshed every second.\n\n"
+               @"Bundled digit GIFs live at Cyanide/tweaks/anitime/0.gif..9.gif and ship inside the app bundle. Use the file picker to swap to your own folder of digit GIFs.\n\n"
+               @"Size controls overall digit height. Spacing is the gap between digits. Format toggles 12h / 24h. Show seconds renders six digits instead of four.\n\n"
+               @"AniTime is a d1y tweak: Run opens the SpringBoard channel and Reapply re-pushes the current digit set. Toggling the master switch removes the overlay.";
     }
     return nil;
 }
@@ -6561,6 +6760,47 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kSettingsNSBarEnabled];
         [[NSUserDefaults standardUserDefaults] synchronize];
         settings_mark_tweak_applied(kSettingsNSBarEnabled, NO);
+        settings_notify_package_queue_changed_async();
+    });
+}
+
+#pragma mark - AniTime (d1y) helpers
+
+- (void)applyAniTimeNow
+{
+    if (!g_springboard_rc_ready) {
+        [self runTweaksRequested:@"Apply AniTime now? Run kexploit first."];
+        return;
+    }
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (![d boolForKey:kSettingsAniTimeEnabled]) {
+        [d setBool:YES forKey:kSettingsAniTimeEnabled];
+        [d synchronize];
+    }
+    AniTimeConfig cfg = anitime_config_from_defaults();
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        @synchronized (settings_rc_lock()) {
+            if (!g_springboard_rc_ready) return;
+            bool ok = anitime_apply_in_session(cfg);
+            settings_mark_tweak_applied(kSettingsAniTimeEnabled,
+                                        ok && [d boolForKey:kSettingsAniTimeEnabled]);
+            printf("[SETTINGS] AniTime manual apply result=%d\n", ok);
+        }
+        settings_start_anitime_per_second_loop();
+        settings_notify_package_queue_changed_async();
+    });
+}
+
+- (void)stopAniTimeNow
+{
+    settings_end_anitime_per_second_loop("AniTime stopped");
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        @synchronized (settings_rc_lock()) {
+            if (g_springboard_rc_ready) anitime_stop_in_session();
+        }
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kSettingsAniTimeEnabled];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        settings_mark_tweak_applied(kSettingsAniTimeEnabled, NO);
         settings_notify_package_queue_changed_async();
     });
 }
@@ -8848,6 +9088,17 @@ void cyanide_present_contact(UIViewController *host)
             [self applyNSBarNow];
         } else if ([action isEqualToString:@"nsbar-stop"]) {
             [self stopNSBarNow];
+        }
+        return;
+    }
+
+    if (indexPath.section == SectionAniTime) {
+        NSDictionary *row = [self rowsForSection:indexPath.section][indexPath.row];
+        NSString *action = row[@"action"];
+        if ([action isEqualToString:@"anitime-apply"]) {
+            [self applyAniTimeNow];
+        } else if ([action isEqualToString:@"anitime-stop"]) {
+            [self stopAniTimeNow];
         }
         return;
     }

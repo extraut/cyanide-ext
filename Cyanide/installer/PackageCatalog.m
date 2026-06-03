@@ -25,6 +25,7 @@ static const NSInteger kSecGravityLite      = 16;
 static const NSInteger kSecLiveWP           = 17;
 static const NSInteger kSecNiceBarLite      = 18;
 static const NSInteger kSecNSBar            = 19;
+static const NSInteger kSecAniTime          = 20;
 
 + (NSArray<Package *> *)allPackages
 {
@@ -266,6 +267,19 @@ static const NSInteger kSecNSBar            = 19;
                                           isNew:YES];
         nsbar.settingsSection = kSecNSBar;
 
+        Package *anitime = [[Package alloc] initWithIdentifier:@"com.darksword.anitime"
+                                           name:@"AniTime"
+                               shortDescription:@"Animated GIF digits on the lock-screen clock"
+                               longDescription:@"Replaces the four lock-screen clock digits with animated GIFs read from the device's local time. Choose small / compact / normal digit size, tighten or widen the spacing between digits, switch between 12-hour and 24-hour formats, and optionally show seconds.\n\nThe digit GIFs are bundled in the app and ship with every build. They live at Cyanide/tweaks/anitime/0.gif..9.gif.\n\nToggling on a Reapply push re-attaches the current digit set. Toggling off removes the overlay and frees the cached pointers.\n\nD1y tweak: the overlay lives only as long as the active Cyanide SpringBoard session."
+                                        version:version
+                                         author:@"zeroxjf"
+                                       category:@"LockScreen"
+                                     symbolName:@"lock.fill"
+                                           kind:PackageInstallKindToggle
+                                     enabledKey:kSettingsAniTimeEnabled
+                                          isNew:YES];
+        anitime.settingsSection = kSecAniTime;
+
         Package *nanoRegistry = [[Package alloc] initWithIdentifier:@"com.darksword.nanoregistry"
                                            name:@"Watch Pairing Override"
                                shortDescription:@"Pair a newer watch or revive an older one"
@@ -410,6 +424,7 @@ static const NSInteger kSecNSBar            = 19;
             livewp,
             niceBarLite,
             nsbar,
+            anitime,
         ];
     });
     return list;
@@ -418,6 +433,7 @@ static const NSInteger kSecNSBar            = 19;
 + (NSArray<NSString *> *)categoriesInOrder
 {
     NSArray<NSString *> *preferred = @[
+        @"LockScreen",
         @"In Development",
         @"Experimental",
         @"Beta",
