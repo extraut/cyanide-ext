@@ -201,32 +201,32 @@ bool livewp_swap_video_in_session(NSString *videoPath)
     // the next autorelease pool drain, leaving g_livewp_player_item dangling.
     r_msg2_main(newItem, "retain", 0, 0, 0, 0);
 
-    // Dispose of the old looper before swapping the template — looper holds
-    // a strong ref to the old item and will keep re-enqueueing stale copies
-    // if we leave it in place.
+    // Dispose of the old looper before swapping the template — the looper
+    // holds a strong ref to the previous templateItem and will keep
+    // re-enqueueing stale copies if we leave it in place. +playerLooper...
+    // returns an autoreleased instance, so we explicitly retain on the
+    // way out and release the old one here.
     if (r_is_objc_ptr(g_livewp_looper)) {
         r_msg2_main(g_livewp_looper, "disableLooping", 0, 0, 0, 0);
         r_msg2(g_livewp_looper, "release", 0, 0, 0, 0);
         g_livewp_looper = 0;
     }
 
-    // Build a fresh looper bound to the new template item. AVPlayerLooper
-    // automatically drives the AVQueuePlayer in an infinite loop with
-    // seamless gapless transitions at the item boundary. Looper init
-    // silently fails on SpringBoard (private API), so we don't bail out
-    // if it returns 0 — the player keeps playing the new item once and
-    // the manual-loop path in livewp_repair_in_session takes over.
+    // Build a fresh looper bound to the new template item. Using the class
+    // factory +[AVPlayerLooper playerLooperWithPlayer:templateItem:] — it
+    // is a class method, not an init, so the objc_method_family(init) check
+    // the runtime does on -init does not apply. The looper takes ownership
+    // of the new templateItem, clones it on each loop, and inserts the
+    // clone into the AVQueuePlayer's queue via insertItem:afterItem:,
+    // producing gapless infinite playback.
     uint64_t newLooper = 0;
-    uint64_t looperClass = r_class("AVPlayerLooper");
-    if (r_is_objc_ptr(looperClass)) {
-        uint64_t allocated = r_msg2_main(looperClass, "alloc", 0, 0, 0, 0);
-        if (r_is_objc_ptr(allocated)) {
-            newLooper = r_msg2_main(allocated, "initWithPlayer:templateItem:",
-                                    g_livewp_player, newItem, 0, 0);
-            if (!r_is_objc_ptr(newLooper)) {
-                log_user("[LIVEWP] swap: AVPlayerLooper init failed (non-fatal)\n");
-                r_msg2(allocated, "release", 0, 0, 0, 0);
-            }
+    uint64_t looperCls = r_class("AVPlayerLooper");
+    if (r_is_objc_ptr(looperCls)) {
+        newLooper = r_msg2_main(looperCls,
+                                "playerLooperWithPlayer:templateItem:",
+                                g_livewp_player, newItem, 0, 0);
+        if (!r_is_objc_ptr(newLooper)) {
+            log_user("[LIVEWP] swap: AVPlayerLooper factory returned nil (non-fatal)\n");
         }
     }
 
@@ -328,27 +328,24 @@ static bool livewp_create_player(NSString *videoPath)
 
     // AVPlayerLooper REQUIRES an AVQueuePlayer and observes end-of-stream
     // to re-enqueue a fresh copy of the template item, producing gapless
-    // infinite playback. Try to build it; if it fails we fall back to the
-    // manual seekToTime:0 path in livewp_repair_in_session.
+    // infinite playback. The class factory
+    // +[AVPlayerLooper playerLooperWithPlayer:templateItem:] returns an
+    // autoreleased instance and does NOT trigger objc_method_family(init)
+    // rejection on out-of-process invocations (unlike -init, which the
+    // runtime flags as "second init" and returns nil for). If the class
+    // is missing, fall back to the manual seekToTime:0 path in
+    // livewp_repair_in_session.
     uint64_t looper = 0;
     if (useQueuePlayer) {
-        uint64_t looperClass = r_class("AVPlayerLooper");
-        if (!r_is_objc_ptr(looperClass)) {
-            log_user("[LIVEWP] AVPlayerLooper class not found — manual loop\n");
-        } else {
-            // Two-step alloc/init — init must run on a real instance, not
-            // on the class object.
-            uint64_t allocated = r_msg2_main(looperClass, "alloc", 0, 0, 0, 0);
-            if (!r_is_objc_ptr(allocated)) {
-                log_user("[LIVEWP] AVPlayerLooper alloc failed — manual loop\n");
-            } else {
-                looper = r_msg2_main(allocated, "initWithPlayer:templateItem:",
-                                    player, playerItem, 0, 0);
-                if (!r_is_objc_ptr(looper)) {
-                    log_user("[LIVEWP] AVPlayerLooper init failed — manual loop\n");
-                    r_msg2(allocated, "release", 0, 0, 0, 0);
-                }
+        uint64_t looperCls = r_class("AVPlayerLooper");
+        if (r_is_objc_ptr(looperCls)) {
+            looper = r_msg2_main(looperCls, "playerLooperWithPlayer:templateItem:",
+                                 player, playerItem, 0, 0);
+            if (!r_is_objc_ptr(looper)) {
+                log_user("[LIVEWP] AVPlayerLooper factory returned nil — manual loop\n");
             }
+        } else {
+            log_user("[LIVEWP] AVPlayerLooper class not found — manual loop\n");
         }
     }
 
