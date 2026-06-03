@@ -404,6 +404,12 @@ static const NSInteger kSecNSBar            = 19;
             stageStrip,
             locationSim,
             themer,
+
+            // d1y ports — Live Wallpaper, NiceBar Lite, NSBar. Kept at the
+            // bottom of the SpringBoard Tweaks bucket for now.
+            livewp,
+            niceBarLite,
+            nsbar,
         ];
     });
     return list;
