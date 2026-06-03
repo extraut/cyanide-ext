@@ -235,7 +235,7 @@ static uint64_t anitime_load_gif_as_remote_uiimage(int digit)
         r_dlsym_call(R_TIMEOUT, "free", scratch, 0,0,0,0,0,0,0);
         return 0;
     }
-    uint64_t nsData = r_msg2_main(alloc, "initWithBytes:length:", scratch, (uint64_t)bytes.length, 0, 0, 0);
+    uint64_t nsData = r_msg2_main(alloc, "initWithBytes:length:", scratch, (uint64_t)bytes.length, 0, 0);
     if (!r_is_objc_ptr(nsData)) {
         r_dlsym_call(R_TIMEOUT, "free", scratch, 0,0,0,0,0,0,0);
         return 0;
@@ -308,7 +308,7 @@ static uint64_t anitime_ensure_container(AniTimeConfig cfg)
 
     // Match the clock view's frame.
     struct { double x, y, w, h; } rect;
-    if (r_msg2_main_struct_ret(gAniTimeClockView, "bounds", &rect, sizeof(rect), NULL,0, NULL,0, NULL,0)) {
+    if (r_msg2_main_struct_ret(gAniTimeClockView, "bounds", &rect, sizeof(rect), NULL,0, NULL,0, NULL,0, NULL,0)) {
         r_msg2_main_raw(container, "setFrame:",
                         &rect, sizeof(rect),
                         NULL, 0, NULL, 0, NULL, 0);
@@ -471,7 +471,7 @@ bool anitime_apply_in_session(AniTimeConfig cfg)
 
     // Compute per-slot frames.
     struct { double x, y, w, h; } bounds;
-    if (!r_msg2_main_struct_ret(container, "bounds", &bounds, sizeof(bounds), NULL,0, NULL,0, NULL,0)) {
+    if (!r_msg2_main_struct_ret(container, "bounds", &bounds, sizeof(bounds), NULL,0, NULL,0, NULL,0, NULL,0)) {
         printf("[ANITIME] failed to read container bounds\n");
         return false;
     }
