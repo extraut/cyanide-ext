@@ -6291,13 +6291,13 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
                                            style:UIAlertActionStyleDefault
                                          handler:^(UIAlertAction *a) {
         (void)a;
-        [self presentLiveWPPhotosPicker];
+        [self presentLiveWPDocumentPickerInternal];
     }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"Files & iCloud Drive"
                                            style:UIAlertActionStyleDefault
                                          handler:^(UIAlertAction *a) {
         (void)a;
-        [self presentLiveWPDocumentPicker];
+        [self presentLiveWPDocumentPickerInternal];
     }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
                                            style:UIAlertActionStyleCancel
@@ -6336,16 +6336,6 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     return nil;
 }
 
-- (void)presentLiveWPPhotosPicker
-{
-    [self presentLiveWPDocumentPickerInternal];
-}
-
-- (void)presentLiveWPDocumentPicker
-{
-    [self presentLiveWPDocumentPickerInternal];
-}
-
 - (void)presentLiveWPDocumentPickerInternal
 {
     UTType *movieType = [UTType typeWithIdentifier:@"public.movie"];
@@ -6356,8 +6346,6 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
     self.activeDocumentPickerMode = @"livewp";
-    [self presentViewController:picker animated:YES completion:nil];
-}
     [self presentViewController:picker animated:YES completion:nil];
 }
 
