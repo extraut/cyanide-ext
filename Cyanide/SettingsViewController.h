@@ -84,11 +84,10 @@ extern NSString * const kSettingsNSBarEnabled;
 extern NSString * const kSettingsNSBarPosition;  // 0..4 (top-left, bottom-left, top-right, bottom-right, center)
 
 // AniTime (d1y): animated GIF digits on the lock-screen clock.
-extern NSString * const kSettingsAniTimeEnabled;       // master toggle
-extern NSString * const kSettingsAniTimeSize;           // 0=Small, 1=Compact, 2=Normal
+extern NSString * const kSettingsAniTimeEnabled;       // master toggle (Activate button)
+extern NSString * const kSettingsAniTimeSize;           // 0=Off, 1=Compact
 extern NSString * const kSettingsAniTimeSpacing;        // 0..16 pt
-extern NSString * const kSettingsAniTimeFormat24h;      // YES for 24-hour
-extern NSString * const kSettingsAniTimeShowSeconds;    // YES to render HH:MM:SS
+extern NSString * const kSettingsAniTimeFormat;         // 0=12h, 1=24h
 
 extern NSString * const kSettingsLocationSimLatitude;
 extern NSString * const kSettingsLocationSimLongitude;

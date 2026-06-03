@@ -270,9 +270,9 @@ static const NSInteger kSecAniTime          = 20;
         Package *anitime = [[Package alloc] initWithIdentifier:@"com.darksword.anitime"
                                            name:@"AniTime"
                                shortDescription:@"Animated GIF digits on the lock-screen clock"
-                               longDescription:@"Replaces the four lock-screen clock digits with animated GIFs read from the device's local time. Choose small / compact / normal digit size, tighten or widen the spacing between digits, switch between 12-hour and 24-hour formats, and optionally show seconds.\n\nThe digit GIFs are bundled in the app and ship with every build. They live at Cyanide/tweaks/anitime/0.gif..9.gif.\n\nToggling on a Reapply push re-attaches the current digit set. Toggling off removes the overlay and frees the cached pointers.\n\nD1y tweak: the overlay lives only as long as the active Cyanide SpringBoard session."
+                               longDescription:@"Replaces the four lock-screen clock digits with animated GIFs read from the device's local time. Adjust the spacing between digits and switch between 12-hour and 24-hour formats.\n\nUse Activate to install and start the overlay, Deactivate to remove it.\n\nTweak by user extra."
                                         version:version
-                                         author:@"zeroxjf"
+                                         author:@"extra"
                                        category:@"LockScreen"
                                      symbolName:@"lock.fill"
                                            kind:PackageInstallKindToggle
