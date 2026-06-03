@@ -17,5 +17,11 @@ bool livewp_stop_in_session(void);
 void livewp_forget_remote_state(void);
 bool livewp_swap_video_in_session(NSString *videoPath);
 NSString *livewp_absolute_path(void);
+// Pause / resume without tearing down the layer pair. Used by the
+// Settings-side screen-state observer so the wallpaper stops decoding
+// frames while the display is off and resumes on wake. Resume also
+// reattaches the layers in case SpringBoard recycled its windows.
+bool livewp_pause_in_session(void);
+bool livewp_resume_in_session(void);
 
 #endif

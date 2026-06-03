@@ -102,6 +102,41 @@ bool livewp_stop_in_session(void)
     return true;
 }
 
+// Pause without removing the layer pair. Cheap, idempotent, safe to call
+// from a screen-off darwin-notify observer: no AVPlayer recreation, no
+// superlayer surgery — the AVPlayer just stops decoding frames until
+// livewp_resume_in_session() or livewp_repair_in_session() restarts it.
+bool livewp_pause_in_session(void)
+{
+    if (!g_livewp_configured) return true;
+    if (!r_is_objc_ptr(g_livewp_player)) {
+        // Remote state lost between configure and pause — fall back to a
+        // full repair so the next wake has a working player.
+        return livewp_repair_in_session();
+    }
+    r_msg2_main(g_livewp_player, "pause", 0, 0, 0, 0);
+    return true;
+}
+
+bool livewp_resume_in_session(void)
+{
+    if (!g_livewp_configured) return true;
+    if (!r_is_objc_ptr(g_livewp_player)) {
+        // The SpringBoard session respawned under us while the screen was
+        // off. Rebuild the layer pair and replay.
+        NSString *path = livewp_absolute_path();
+        if (!path.length) return false;
+        if (!livewp_create_player(path)) return false;
+        return livewp_attach_and_play();
+    }
+    // Make sure both layers are still attached to the (possibly recycled)
+    // SpringBoard windows before resuming playback — that is what fixes
+    // the "icons disappear for a couple seconds after unlock" symptom.
+    if (!livewp_attach_and_play()) return false;
+    r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
+    return true;
+}
+
 bool livewp_repair_in_session(void)
 {
     if (!g_livewp_configured) return false;
@@ -260,7 +295,17 @@ static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool 
     if (curSuper != winLayer) {
         if (r_is_objc_ptr(curSuper))
             r_msg2_main(layer, "removeFromSuperlayer", 0, 0, 0, 0);
-        r_msg2_main(winLayer, "insertSublayer:atIndex:", layer, 0, 0, 0);
+        // Insert at index 1: above the background wallpaper layer (always
+        // at index 0) but below SBIconView and the rest of the content.
+        // The previous atIndex:0 placed us underneath the wallpaper, so
+        // the stock wallpaper rendered on top during lockscreen pull-down
+        // and the home-screen "icons disappear after unlock" flash was
+        // caused by the layer being reattached at the very top of the
+        // stack on every window transition. UIWindow siblings are still
+        // ordered by UIScreen, so this only affects the content inside
+        // SBCoverSheetWindow / SBHomeScreenWindow.
+        r_msg2_main(winLayer, "insertSublayer:atIndex:",
+                    layer, (uint64_t)1, 0, 0, 0);
         if (movedOut) *movedOut = true;
     }
     return true;

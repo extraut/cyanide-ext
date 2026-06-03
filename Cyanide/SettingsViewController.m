@@ -1002,6 +1002,41 @@ static void settings_handle_springboard_restart(void)
     });
 }
 
+// LiveWP needs to pause when the display blanks and resume when it wakes
+// so the AVPlayer doesn't keep decoding while the screen is off, and so
+// the layers are reattached the moment the user looks at the device
+// again. Driving the call from the screen-state observers also fixes the
+// "icons disappear for a second after unlock" symptom: resume reattaches
+// the layers synchronously so the home screen renders with the video
+// already in place, instead of having the layer pair come up empty
+// during the SpringBoard window transition.
+static void settings_handle_livewp_screen_state_change(const char *reason)
+{
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kSettingsLiveWPEnabled]) {
+        return;
+    }
+    BOOL awake = (g_screen_awake != 0);
+    if (awake) {
+        if (!g_springboard_rc_ready) return;
+        dispatch_async(dispatch_get_global_queue(0, 0), ^{
+            @synchronized (settings_rc_lock()) {
+                if (!g_springboard_rc_ready) return;
+                bool ok = livewp_resume_in_session();
+                printf("[SETTINGS] LiveWP resume (%s) result=%d\n", reason ?: "?", ok);
+            }
+        });
+    } else {
+        if (!g_springboard_rc_ready) return;
+        dispatch_async(dispatch_get_global_queue(0, 0), ^{
+            @synchronized (settings_rc_lock()) {
+                if (!g_springboard_rc_ready) return;
+                bool ok = livewp_pause_in_session();
+                printf("[SETTINGS] LiveWP pause (%s) result=%d\n", reason ?: "?", ok);
+            }
+        });
+    }
+}
+
 static void settings_install_screen_awake_observers(void)
 {
     static dispatch_once_t onceToken;
@@ -1014,6 +1049,7 @@ static void settings_install_screen_awake_observers(void)
                 settings_apply_statbar_once_async("screen awake");
                 settings_schedule_themer_quiet_repair_burst("screen awake");
                 settings_restart_gravity_motion_if_active("screen awake");
+                settings_handle_livewp_screen_state_change("screen awake");
             }
         });
         if (status != NOTIFY_STATUS_OK) {
@@ -1028,6 +1064,7 @@ static void settings_install_screen_awake_observers(void)
                 settings_apply_statbar_once_async("screen awake");
                 settings_schedule_themer_quiet_repair_burst("display awake");
                 settings_restart_gravity_motion_if_active("display awake");
+                settings_handle_livewp_screen_state_change("display awake");
             }
         });
         if (status != NOTIFY_STATUS_OK) {
@@ -6374,22 +6411,68 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 
 - (void)applyLiveWPNow
 {
-    if (!g_springboard_rc_ready) {
-        [self runTweaksRequested:@"Apply Live Wallpaper now? Run kexploit first."];
+    // Apply Wallpaper is the user-friendly entry point. If the user has
+    // not yet toggled the module on, flip it on for them — that's the
+    // whole point of pressing Apply. If kexploit isn't ready, show the
+    // result inline (no Log-tab navigation, no extra "are you sure"
+    // dialog) so the action feels immediate.
+    if (!g_kexploit_done || !g_springboard_rc_ready) {
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"Run Tweaks First"
+                             message:@"Apply Tweaks needs to finish before Live Wallpaper can attach. Tap Run on the Apply Tweaks row, then come back here and press Apply Wallpaper again."
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"OK"
+                                               style:UIAlertActionStyleDefault
+                                             handler:nil]];
+        [self presentViewController:ac animated:YES completion:nil];
         return;
     }
+
+    // Auto-enable the master toggle so the user doesn't have to flip a
+    // switch in a separate row and then re-tap Apply. The tweak's
+    // Run-path will then treat it as a normal "user wants this on" run.
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (![d boolForKey:kSettingsLiveWPEnabled]) {
+        [d setBool:YES forKey:kSettingsLiveWPEnabled];
+        [d synchronize];
+    }
+
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        __block bool ok = false;
         @synchronized (settings_rc_lock()) {
             if (!g_springboard_rc_ready) return;
-            NSString *path = [[NSUserDefaults standardUserDefaults] stringForKey:kSettingsLiveWPVideoPath];
-            bool ok = path.length
-                ? livewp_swap_video_in_session(path) || livewp_apply_in_session()
+            NSString *path = [d stringForKey:kSettingsLiveWPVideoPath];
+            ok = path.length
+                ? (livewp_swap_video_in_session(path) || livewp_apply_in_session())
                 : livewp_apply_in_session();
-            settings_mark_tweak_applied(kSettingsLiveWPEnabled,
-                                        ok && [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsLiveWPEnabled]);
+            settings_mark_tweak_applied(kSettingsLiveWPEnabled, ok);
             printf("[SETTINGS] LiveWP manual apply result=%d\n", ok);
         }
         settings_notify_package_queue_changed_async();
+
+        // Report the result on the main queue with an inline alert — no
+        // navigation to the Log tab, no extra "are you sure" prompt.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *path = [d stringForKey:kSettingsLiveWPVideoPath];
+            NSString *msg;
+            if (!ok) {
+                msg = path.length
+                    ? @"Couldn't attach the video. The SpringBoard session may have been lost — try Run, then Apply again."
+                    : @"Couldn't start Live Wallpaper. Pick a video first.";
+            } else {
+                msg = path.length
+                    ? @"Live Wallpaper attached."
+                    : @"Live Wallpaper started. Pick a video in Settings to make it your wallpaper.";
+            }
+            UIAlertController *ac = [UIAlertController
+                alertControllerWithTitle:ok ? @"Live Wallpaper" : @"Live Wallpaper Failed"
+                                 message:msg
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [ac addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                   style:UIAlertActionStyleDefault
+                                                 handler:nil]];
+            [self presentViewController:ac animated:YES completion:nil];
+        });
     });
 }
 
