@@ -6129,7 +6129,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     switch (row) {
         case 0:
             cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"at" color:UIColor.systemBlueColor size:29.0];
-            cell.textLabel.text = @"Twitter Owner Project";
+            cell.textLabel.text = @"Twitter Owner Project1";
             cell.detailTextLabel.text = @"@zeroxjf";
             break;
         case 1:
