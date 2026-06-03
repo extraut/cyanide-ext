@@ -285,15 +285,11 @@ static bool livewp_create_player(NSString *videoPath)
     uint64_t lockLayer = livewp_make_layer(player);
     if (!r_is_objc_ptr(homeLayer) || !r_is_objc_ptr(lockLayer)) return false;
 
-    uint64_t session = r_msg2_main(r_class("AVAudioSession"), "sharedInstance", 0, 0, 0, 0);
-    if (r_is_objc_ptr(session)) {
-        uint64_t cat = r_nsstr_retained("AVAudioSessionCategoryAmbient");
-        if (r_is_objc_ptr(cat)) {
-            r_dlsym_call(R_TIMEOUT, "objc_msgSend", session, r_sel("setCategory:withOptions:error:"),
-                         cat, (uint64_t)1, (uint64_t)0, 0, 0, 0);
-            r_msg2(cat, "release", 0, 0, 0, 0);
-        }
-    }
+    // No AVAudioSession category set. The player is muted via
+    // setVolume:0 above, so the system doesn't need a category for it.
+    // Touching AVAudioSession from outside SpringBoard's normal flow
+    // can also race with mediaremoted / imagent; safer to leave it
+    // alone.
 
     g_livewp_player = player;
     g_livewp_player_item = playerItem;
@@ -303,7 +299,16 @@ static bool livewp_create_player(NSString *videoPath)
     return true;
 }
 
-// 辅助：把 layer 插到指定 window 的 index 0，返回是否已附着成功。
+// Attach the AVPlayerLayer to a SpringBoard window. Conservative variant
+// for iOS 26: NO setFrame, NO setZPosition, NO insertSublayer:atIndex:.
+// setFrame stomps autolayout constraints that SBHomeScreenView /
+// SBCoverSheetView set up internally — on iOS 26 that triggers a
+// constraint-solver assertion and a SpringBoard crash. setZPosition
+// is similarly fragile against private compositors that depend on the
+// stock z-stacking. We just bounds+position the sublayer and append it;
+// the layer tree above is still allowed to draw on top of us, and that
+// is the correct visual: live wallpaper sits under the icons/lock view
+// and is only visible in the gaps.
 static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool *movedOut)
 {
     if (movedOut) *movedOut = false;
@@ -315,28 +320,29 @@ static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool 
     LiveWPRect bounds = {0};
     r_msg2_main_struct_ret(window, "bounds", &bounds, sizeof(bounds),
                            NULL, 0, NULL, 0, NULL, 0, NULL, 0);
-    r_msg2_main_raw(layer, "setFrame:",
+
+    // bounds.size → setBounds:, bounds midpoint → setPosition:.
+    // Touching only bounds/position is safe against autolayout — it
+    // doesn't invalidate the parent's constraint graph, only its own.
+    struct { double w; double h; } sz = { bounds.w, bounds.h };
+    r_msg2_main_raw(layer, "setBounds:",
                     &bounds, sizeof(bounds), NULL, 0, NULL, 0, NULL, 0);
+    struct { double x; double y; } pos = { bounds.w * 0.5, bounds.h * 0.5 };
+    r_msg2_main_raw(layer, "setPosition:",
+                    &pos, sizeof(pos), NULL, 0, NULL, 0, NULL, 0);
+    (void)sz;
 
     uint64_t curSuper = r_msg2_main(layer, "superlayer", 0, 0, 0, 0);
     if (curSuper != winLayer) {
         if (r_is_objc_ptr(curSuper))
             r_msg2_main(layer, "removeFromSuperlayer", 0, 0, 0, 0);
-        // Insert at index 1 (above the background wallpaper, which is
-        // always at index 0). Then set zPosition to -0.5 so we sit
-        // *between* the wallpaper (typically zPosition = -1) and the
-        // SBIconView / SBLockScreenView content (zPosition = 0). The
-        // previous attempts at atIndex:0 and atIndex:INT_MAX each broke
-        // one of the two windows: atIndex:0 placed us underneath the
-        // wallpaper so the stock wallpaper rendered on top during
-        // lockscreen pull-down; INT_MAX placed us above the icons, so
-        // the home-screen icons disappeared behind the video. -0.5
-        // gives the right visual stacking on iOS 26.
-        r_msg2_main(winLayer, "insertSublayer:atIndex:",
-                    layer, (uint64_t)1, 0, 0);
-        double z = -0.5;
-        r_msg2_main_raw(layer, "setZPosition:",
-                        &z, sizeof(z), NULL, 0, NULL, 0, NULL, 0);
+        // Plain addSublayer: — appends to the end. No atIndex, no zPosition.
+        // SpringBoard's content layers (icons, lock content) are typically
+        // added after the wallpaper; we land underneath them and the video
+        // shows in the wallpaper region. If the visual stacking is wrong
+        // we can revisit with -insertSublayer:below: a specific sibling,
+        // but the safe path is "don't fight the autolayout".
+        r_msg2_main(winLayer, "addSublayer:", layer, 0, 0, 0);
         if (movedOut) *movedOut = true;
     }
     return true;
