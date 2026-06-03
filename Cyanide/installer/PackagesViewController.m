@@ -182,12 +182,6 @@ static NSString * const kGroupByCategoryDefault = @"installer.groupByCategory";
     }
     self.flatPackages = filtered;
 
-    printf("[PackagesVC] rebuildFilteredData groupByCategory=%d allPackagesSorted=%lu filtered=%lu searchText='%s'\n",
-           self.groupByCategory ? 1 : 0,
-           (unsigned long)self.allPackagesSorted.count,
-           (unsigned long)filtered.count,
-           [self.searchText UTF8String] ?: "");
-
     if (!self.groupByCategory) {
         self.visibleCategories = nil;
         self.packagesByCategory = nil;
@@ -208,13 +202,6 @@ static NSString * const kGroupByCategoryDefault = @"installer.groupByCategory";
     }
     self.visibleCategories = cats;
     self.packagesByCategory = bucket;
-    printf("[PackagesVC] visibleCategories=%s\n",
-           [[cats componentsJoinedByString:@" | "] UTF8String] ?: "");
-    for (NSString *c in cats) {
-        printf("[PackagesVC]   %s -> %lu packages\n",
-               [c UTF8String] ?: "?",
-               (unsigned long)[bucket[c] count]);
-    }
 }
 
 #pragma mark - Data source
