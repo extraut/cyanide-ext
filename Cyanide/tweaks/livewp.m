@@ -28,6 +28,14 @@ static uint64_t g_livewp_looper = 0;
 static uint64_t g_livewp_home_window = 0;
 static uint64_t g_livewp_lock_window = 0;
 static bool g_livewp_configured = false;
+static bool g_livewp_paused = false;          // true between pause_in_session and resume_in_session
+static dispatch_source_t g_livewp_repair_source = NULL;
+static dispatch_queue_t  g_livewp_repair_queue  = NULL;
+// Manual loop tick. actionAtItemEnd=Pause means AVPlayer stops decoding the
+// moment the item reaches duration, so without a periodic rewind+play the
+// wallpaper freezes on its last frame after the first playthrough. 2s is
+// short enough to feel seamless on a 3–6s loop and long enough to be free.
+static const uint64_t kLiveWPRepairIntervalNS = 2ull * NSEC_PER_SEC;
 
 typedef struct { double x, y, w, h; } LiveWPRect;
 
@@ -45,6 +53,8 @@ NSString * const kLiveWPVideoPath = @"LiveWPVideoPath";
 static bool livewp_create_player(NSString *videoPath);
 static bool livewp_attach_and_play(void);
 static void livewp_cleanup(void);
+static void livewp_start_repair_timer(void);
+static void livewp_stop_repair_timer(void);
 
 // ============================================================================
 // MARK: - Public Interface
@@ -80,6 +90,8 @@ bool livewp_apply_in_session(void)
     if (!livewp_attach_and_play()) { livewp_cleanup(); return false; }
 
     g_livewp_configured = true;
+    g_livewp_paused = false;
+    livewp_start_repair_timer();
     log_user("[LIVEWP] OK: playing.\n");
     return true;
 }
@@ -87,6 +99,8 @@ bool livewp_apply_in_session(void)
 bool livewp_stop_in_session(void)
 {
     if (!g_livewp_configured) return true;
+
+    livewp_stop_repair_timer();
 
     if (r_is_objc_ptr(g_livewp_player))
         r_msg2_main(g_livewp_player, "pause", 0, 0, 0, 0);
@@ -98,6 +112,7 @@ bool livewp_stop_in_session(void)
 
     livewp_cleanup();
     g_livewp_configured = false;
+    g_livewp_paused = false;
     log_user("[LIVEWP] stopped.\n");
     return true;
 }
@@ -114,6 +129,11 @@ bool livewp_pause_in_session(void)
         // full repair so the next wake has a working player.
         return livewp_repair_in_session();
     }
+    // Stop the loop tick first so it can't fire [player play] between our
+    // pause call and the next wake, then mark paused so a late tick
+    // arriving between pause() and stop_repair_timer() is a no-op.
+    livewp_stop_repair_timer();
+    g_livewp_paused = true;
     r_msg2_main(g_livewp_player, "pause", 0, 0, 0, 0);
     return true;
 }
@@ -121,19 +141,25 @@ bool livewp_pause_in_session(void)
 bool livewp_resume_in_session(void)
 {
     if (!g_livewp_configured) return true;
+    g_livewp_paused = false;
     if (!r_is_objc_ptr(g_livewp_player)) {
         // The SpringBoard session respawned under us while the screen was
         // off. Rebuild the layer pair and replay.
         NSString *path = livewp_absolute_path();
         if (!path.length) return false;
         if (!livewp_create_player(path)) return false;
-        return livewp_attach_and_play();
+        if (!livewp_attach_and_play()) return false;
+        livewp_start_repair_timer();
+        return true;
     }
     // Make sure both layers are still attached to the (possibly recycled)
     // SpringBoard windows before resuming playback — that is what fixes
     // the "icons disappear for a couple seconds after unlock" symptom.
     if (!livewp_attach_and_play()) return false;
     r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
+    // Re-arm the manual loop in case the screen was off long enough for
+    // the item to have run to its end while paused.
+    livewp_start_repair_timer();
     return true;
 }
 
@@ -194,6 +220,7 @@ bool livewp_swap_video_in_session(NSString *videoPath)
 
 void livewp_forget_remote_state(void)
 {
+    livewp_stop_repair_timer();
     g_livewp_player = 0;
     g_livewp_home_layer = 0;
     g_livewp_lock_layer = 0;
@@ -202,6 +229,7 @@ void livewp_forget_remote_state(void)
     g_livewp_home_window = 0;
     g_livewp_lock_window = 0;
     g_livewp_configured = false;
+    g_livewp_paused = false;
 }
 
 // ============================================================================
@@ -398,4 +426,49 @@ static void livewp_cleanup(void)
     g_livewp_looper = 0;
     g_livewp_home_window = 0;
     g_livewp_lock_window = 0;
+}
+
+// Periodic rewind+play so the wallpaper actually loops. actionAtItemEnd:Pause
+// stops the player at duration; the tick notices currentTime >= duration and
+// seeks back to zero, then attach_and_play re-stamps layer positions on any
+// window SpringBoard recycled while we were idle.
+static void livewp_repair_tick(void)
+{
+    if (!g_livewp_configured) return;
+    // Drop ticks that arrive after pause_in_session but before the source
+    // is torn down — they'd undo the pause and start decoding frames on a
+    // blanked screen.
+    if (g_livewp_paused) return;
+    livewp_repair_in_session();
+}
+
+static void livewp_start_repair_timer(void)
+{
+    if (g_livewp_repair_source) return;
+    if (!g_livewp_repair_queue) {
+        g_livewp_repair_queue = dispatch_queue_create("cyanide.livewp.repair", DISPATCH_QUEUE_SERIAL);
+    }
+    dispatch_source_t src = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_livewp_repair_queue);
+    if (!src) return;
+    // First fire after one interval — by then attach_and_play has just
+    // run inside apply/resume, and a 2s cadence is short enough to feel
+    // seamless on a 3–6s loop and long enough to be free.
+    dispatch_source_set_timer(src,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)kLiveWPRepairIntervalNS),
+                              (uint64_t)kLiveWPRepairIntervalNS,
+                              (uint64_t)(NSEC_PER_SEC / 2));
+    dispatch_source_set_event_handler(src, ^{ livewp_repair_tick(); });
+    g_livewp_repair_source = src;
+    dispatch_resume(src);
+}
+
+static void livewp_stop_repair_timer(void)
+{
+    dispatch_source_t src = g_livewp_repair_source;
+    g_livewp_repair_source = NULL;
+    if (!src) return;
+    dispatch_source_cancel(src);
+    // dispatch_source_cancel only marks the source; release after it has
+    // been resumed so the dispatch object is balanced.
+    dispatch_release(src);
 }
