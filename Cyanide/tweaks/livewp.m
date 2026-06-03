@@ -304,7 +304,7 @@ static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool 
         // ordered by UIScreen, so this only affects the content inside
         // SBCoverSheetWindow / SBHomeScreenWindow.
         r_msg2_main(winLayer, "insertSublayer:atIndex:",
-                    layer, (uint64_t)1, 0, 0, 0);
+                    layer, (uint64_t)1, 0, 0);
         if (movedOut) *movedOut = true;
     }
     return true;
