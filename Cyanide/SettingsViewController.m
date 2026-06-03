@@ -5796,7 +5796,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case RootSectionInDev:         return (NSInteger)self.inDevBundleRows.count;
         case RootSectionSystemBundles:  return (NSInteger)self.systemBundleRows.count;
         case RootSectionPatreon:        return 0;
-        case RootSectionExperimental:   return 0;
+        case RootSectionExperimental:   return 1;
         case RootSectionAbout:          return 6;
         case RootSectionCount:          return 0;
     }
@@ -5812,6 +5812,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case RootSectionTweakBundles:   return self.tweakBundleRows.count   > 0 ? @"Tweaks" : nil;
         case RootSectionInDev:         return self.inDevBundleRows.count   > 0 ? @"In Development" : nil;
         case RootSectionSystemBundles:  return self.systemBundleRows.count  > 0 ? @"System" : nil;
+        case RootSectionExperimental:   return @"Experimental";
         case RootSectionAbout:          return @"About";
         default:                        return nil;
     }
@@ -7407,6 +7408,8 @@ void cyanide_present_contact(UIViewController *host)
                 return [self buildInDevCellWithRow:self.inDevBundleRows[indexPath.row] tableView:tableView];
             case RootSectionSystemBundles:
                 return [self buildBundleCellWithRow:self.systemBundleRows[indexPath.row] tableView:tableView];
+            case RootSectionExperimental:
+                return [self buildExperimentalCellInTableView:tableView];
             case RootSectionAbout:
                 return [self buildAboutCellAtRow:indexPath.row tableView:tableView];
             case RootSectionCount:
@@ -8256,6 +8259,15 @@ void cyanide_present_contact(UIViewController *host)
                 SettingsViewController *detail = [[SettingsViewController alloc] initWithUnderlyingSection:underlying
                                                                                               bundleTitle:pushTitle];
                 [self.navigationController pushViewController:detail animated:YES];
+                return;
+            }
+            case RootSectionExperimental: {
+                UITableViewCell *expCell = [tableView cellForRowAtIndexPath:indexPath];
+                if ([expCell.accessoryView isKindOfClass:[UISwitch class]]) {
+                    UISwitch *sw = (UISwitch *)expCell.accessoryView;
+                    [sw setOn:!sw.isOn animated:YES];
+                    [self experimentalSwitchChanged:sw];
+                }
                 return;
             }
             case RootSectionAbout: {
