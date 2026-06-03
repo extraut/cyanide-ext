@@ -28,14 +28,6 @@ static uint64_t g_livewp_looper = 0;
 static uint64_t g_livewp_home_window = 0;
 static uint64_t g_livewp_lock_window = 0;
 static bool g_livewp_configured = false;
-static bool g_livewp_paused = false;           // true between pause_in_session and resume_in_session
-static dispatch_source_t g_livewp_repair_source = NULL;
-static dispatch_queue_t  g_livewp_repair_queue  = NULL;
-// Manual loop tick. AVPlayer with actionAtItemEnd=Pause stops decoding at
-// duration; we rewind to zero and play again. 3s cadence is short enough
-// to feel seamless on 5–10s videos and long enough that we never run more
-// than one r_msg2 round-trip per tick.
-static const uint64_t kLiveWPRepairIntervalNS = 3ull * NSEC_PER_SEC;
 
 typedef struct { double x, y, w, h; } LiveWPRect;
 
@@ -53,8 +45,6 @@ NSString * const kLiveWPVideoPath = @"LiveWPVideoPath";
 static bool livewp_create_player(NSString *videoPath);
 static bool livewp_attach_and_play(void);
 static void livewp_cleanup(void);
-static void livewp_start_repair_timer(void);
-static void livewp_stop_repair_timer(void);
 
 // ============================================================================
 // MARK: - Public Interface
@@ -90,8 +80,6 @@ bool livewp_apply_in_session(void)
     if (!livewp_attach_and_play()) { livewp_cleanup(); return false; }
 
     g_livewp_configured = true;
-    g_livewp_paused = false;
-    livewp_start_repair_timer();
     log_user("[LIVEWP] OK: playing.\n");
     return true;
 }
@@ -99,8 +87,6 @@ bool livewp_apply_in_session(void)
 bool livewp_stop_in_session(void)
 {
     if (!g_livewp_configured) return true;
-
-    livewp_stop_repair_timer();
 
     if (r_is_objc_ptr(g_livewp_player))
         r_msg2_main(g_livewp_player, "pause", 0, 0, 0, 0);
@@ -112,7 +98,6 @@ bool livewp_stop_in_session(void)
 
     livewp_cleanup();
     g_livewp_configured = false;
-    g_livewp_paused = false;
     log_user("[LIVEWP] stopped.\n");
     return true;
 }
@@ -124,43 +109,31 @@ bool livewp_stop_in_session(void)
 bool livewp_pause_in_session(void)
 {
     if (!g_livewp_configured) return true;
-    // Stop the loop tick first so it can't fire play() between our pause
-    // call and the next wake, then mark paused so a late tick arriving
-    // between pause() and stop_repair_timer() is a no-op.
-    livewp_stop_repair_timer();
-    g_livewp_paused = true;
     if (!r_is_objc_ptr(g_livewp_player)) {
         // Remote state lost between configure and pause — fall back to a
         // full repair so the next wake has a working player.
         return livewp_repair_in_session();
     }
     r_msg2_main(g_livewp_player, "pause", 0, 0, 0, 0);
-    log_user("[LIVEWP] paused (screen off)\n");
     return true;
 }
 
 bool livewp_resume_in_session(void)
 {
     if (!g_livewp_configured) return true;
-    g_livewp_paused = false;
     if (!r_is_objc_ptr(g_livewp_player)) {
         // The SpringBoard session respawned under us while the screen was
         // off. Rebuild the layer pair and replay.
         NSString *path = livewp_absolute_path();
         if (!path.length) return false;
         if (!livewp_create_player(path)) return false;
-        if (!livewp_attach_and_play()) return false;
-        livewp_start_repair_timer();
-        return true;
+        return livewp_attach_and_play();
     }
     // Make sure both layers are still attached to the (possibly recycled)
     // SpringBoard windows before resuming playback — that is what fixes
     // the "icons disappear for a couple seconds after unlock" symptom.
     if (!livewp_attach_and_play()) return false;
     r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
-    // Re-arm the manual loop in case the screen was off long enough for
-    // the item to have run to its end while paused.
-    livewp_start_repair_timer();
     return true;
 }
 
@@ -221,7 +194,6 @@ bool livewp_swap_video_in_session(NSString *videoPath)
 
 void livewp_forget_remote_state(void)
 {
-    livewp_stop_repair_timer();
     g_livewp_player = 0;
     g_livewp_home_layer = 0;
     g_livewp_lock_layer = 0;
@@ -230,7 +202,6 @@ void livewp_forget_remote_state(void)
     g_livewp_home_window = 0;
     g_livewp_lock_window = 0;
     g_livewp_configured = false;
-    g_livewp_paused = false;
 }
 
 // ============================================================================
@@ -304,8 +275,7 @@ static bool livewp_create_player(NSString *videoPath)
     return true;
 }
 
-// 辅助：把 layer 插到指定 window 的最底层（под обоями, иконками, всем）。
-// Возвращает, была ли перекладка.
+// 辅助：把 layer 插到指定 window 的 index 0，返回是否已附着成功。
 static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool *movedOut)
 {
     if (movedOut) *movedOut = false;
@@ -324,18 +294,15 @@ static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool 
     if (curSuper != winLayer) {
         if (r_is_objc_ptr(curSuper))
             r_msg2_main(layer, "removeFromSuperlayer", 0, 0, 0, 0);
-        // Insert at index 1. In iOS 26 the stock wallpaper layer is at
-        // index 0 of SBHomeScreenWindow / SBCoverSheetWindow, and content
-        // layers (SBIconView, SBLockScreenView, status bar overlays) are
-        // appended at higher indices. atIndex:1 places us above the
-        // wallpaper and below the content — exactly the wallpaper
-        // position. We do NOT use -insertSublayer:below: relative to
-        // sublayers.firstObject, because on iOS 26 the firstObject in
-        // SBCoverSheetWindow is a status-bar-adjacent layer and inserting
-        // a CALayer below it triggers a UIView autolayout recompute in
-        // a sensitive host hierarchy that asserts and crashes
-        // SpringBoard. atIndex:1 is the safe primitive — no sibling
-        // lookup, no autolayout invalidation, no zPosition mutation.
+        // Insert at index 1: above the background wallpaper layer (always
+        // at index 0) but below SBIconView and the rest of the content.
+        // The previous atIndex:0 placed us underneath the wallpaper, so
+        // the stock wallpaper rendered on top during lockscreen pull-down
+        // and the home-screen "icons disappear after unlock" flash was
+        // caused by the layer being reattached at the very top of the
+        // stack on every window transition. UIWindow siblings are still
+        // ordered by UIScreen, so this only affects the content inside
+        // SBCoverSheetWindow / SBHomeScreenWindow.
         r_msg2_main(winLayer, "insertSublayer:atIndex:",
                     layer, (uint64_t)1, 0, 0);
         if (movedOut) *movedOut = true;
@@ -427,61 +394,4 @@ static void livewp_cleanup(void)
     g_livewp_looper = 0;
     g_livewp_home_window = 0;
     g_livewp_lock_window = 0;
-}
-
-// Periodic rewind so the wallpaper actually loops. actionAtItemEnd:Pause
-// stops the player at duration; the tick checks currentTime and seeks
-// back to zero + plays again. The tick is read-only on the layer tree
-// — no setFrame / insertSublayer / setZPosition / attach_and_play —
-// because re-stamping the layer tree every few seconds is what crashed
-// SpringBoard on iOS 26. Layer management is owned by apply/resume.
-static void livewp_repair_tick(void)
-{
-    if (!g_livewp_configured) return;
-    // Drop ticks that arrive after pause_in_session but before the source
-    // is torn down — they'd undo the pause and start decoding frames on a
-    // blanked screen.
-    if (g_livewp_paused) return;
-    if (!r_is_objc_ptr(g_livewp_player) || !r_is_objc_ptr(g_livewp_player_item)) {
-        return;
-    }
-    struct { long long v; long long ts; } dur = {0, 0}, cur = {0, 0};
-    r_msg2_main_struct_ret(g_livewp_player_item, "duration", &dur, sizeof(dur),
-                           NULL, 0, NULL, 0, NULL, 0, NULL, 0);
-    r_msg2_main_struct_ret(g_livewp_player, "currentTime", &cur, sizeof(cur),
-                           NULL, 0, NULL, 0, NULL, 0, NULL, 0);
-    if (cur.v < dur.v || dur.v <= 0) return;
-    // Reached the end. Rewind and replay.
-    struct { long long v; long long ts; } zero = {0, 0};
-    r_msg2_main_raw(g_livewp_player, "seekToTime:",
-                    &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
-    r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
-}
-
-static void livewp_start_repair_timer(void)
-{
-    if (g_livewp_repair_source) return;
-    if (!g_livewp_repair_queue) {
-        g_livewp_repair_queue = dispatch_queue_create("cyanide.livewp.repair", DISPATCH_QUEUE_SERIAL);
-    }
-    dispatch_source_t src = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_livewp_repair_queue);
-    if (!src) return;
-    dispatch_source_set_timer(src,
-                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)kLiveWPRepairIntervalNS),
-                              (uint64_t)kLiveWPRepairIntervalNS,
-                              (uint64_t)(NSEC_PER_SEC / 2));
-    dispatch_source_set_event_handler(src, ^{ livewp_repair_tick(); });
-    g_livewp_repair_source = src;
-    dispatch_resume(src);
-}
-
-static void livewp_stop_repair_timer(void)
-{
-    dispatch_source_t src = g_livewp_repair_source;
-    g_livewp_repair_source = NULL;
-    if (!src) return;
-    // ARC owns the source. cancel + drop our strong reference. The
-    // event handler block holds a retain on its captured globals, which
-    // ARC releases when the source deallocates after cancel drains.
-    dispatch_source_cancel(src);
 }
