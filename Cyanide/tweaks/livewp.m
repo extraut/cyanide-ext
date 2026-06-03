@@ -271,7 +271,6 @@ static bool livewp_create_player(NSString *videoPath)
     g_livewp_player_item = playerItem;
     g_livewp_home_layer = homeLayer;
     g_livewp_lock_layer = lockLayer;
-    g_livewp_looper = looper;
     log_user("[LIVEWP] player OK (2 layers)\n");
     return true;
 }
@@ -305,7 +304,7 @@ static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool 
         // ordered by UIScreen, so this only affects the content inside
         // SBCoverSheetWindow / SBHomeScreenWindow.
         r_msg2_main(winLayer, "insertSublayer:atIndex:",
-                    layer, (uint64_t)1, 0, 0, 0);
+                    layer, (uint64_t)1, 0, 0);
         if (movedOut) *movedOut = true;
     }
     return true;
