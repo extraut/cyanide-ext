@@ -4613,7 +4613,6 @@ typedef NS_ENUM(NSInteger, RootSection) {
     RootSectionInDev,
     RootSectionSystemBundles,
     RootSectionAbout,
-    RootSectionWarning,
     RootSectionCount,
 };
 
@@ -5188,7 +5187,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     [icon setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
 
     UILabel *label = [[UILabel alloc] init];
-    label.text = @"Cyanide is a limited tweak environment. Session tweaks reset on reboot, while a few packages intentionally modify local system files and may persist until restored. Backups are best-effort only. Use these tools only where you have permission, understand the legal and service-rule impact, and accept the risk. Live tweaks like StatBar and Axon Lite stop if you force-quit Cyanide. A progress log opens while changes apply; tap Hide to dismiss.";
+    label.text = @"";
     label.textColor = UIColor.labelColor;
     label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
     label.numberOfLines = 0;
@@ -5796,20 +5795,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case RootSectionTweakBundles:   return (NSInteger)self.tweakBundleRows.count;
         case RootSectionInDev:         return (NSInteger)self.inDevBundleRows.count;
         case RootSectionSystemBundles:  return (NSInteger)self.systemBundleRows.count;
-        case RootSectionPatreon: {
-            // Unlinked users get two rows: "Link" (for people who already have
-            // a Patreon account) and "New to Patreon? Sign Up" (jumps to the
-            // creator page so they can join in Safari first). Without the
-            // sign-up affordance, a first-time user has no obvious way to
-            // discover that they need a Patreon account to begin with.
-            if (!cyanide_patreon_is_linked()) return 2;
-            // Linked-but-not-pledging gets an extra "Join Member Tier" row
-            // so users have an obvious in-app path to upgrade.
-            return cyanide_is_patron() ? 3 : 4;
-        }
-        case RootSectionExperimental:   return 1;
+        case RootSectionPatreon:        return 0;
+        case RootSectionExperimental:   return 0;
         case RootSectionAbout:          return 6;
-        case RootSectionWarning:        return 0;
         case RootSectionCount:          return 0;
     }
     return 0;
@@ -5824,8 +5812,6 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case RootSectionTweakBundles:   return self.tweakBundleRows.count   > 0 ? @"Tweaks" : nil;
         case RootSectionInDev:         return self.inDevBundleRows.count   > 0 ? @"In Development" : nil;
         case RootSectionSystemBundles:  return self.systemBundleRows.count  > 0 ? @"System" : nil;
-        case RootSectionPatreon:        return @"Patreon";
-        case RootSectionExperimental:   return @"Experimental";
         case RootSectionAbout:          return @"About";
         default:                        return nil;
     }
@@ -5834,26 +5820,6 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section
 {
     if (!self.detailMode) {
-        if ((RootSection)section == RootSectionExperimental) {
-            if (!settings_experimental_access_allowed()) {
-                return @"Early-access for Member tier Patreon supporters.";
-            }
-            return nil;
-        }
-        if ((RootSection)section == RootSectionPatreon) {
-            if (!cyanide_patreon_is_linked()) {
-                return @"Cyanide is free. Patreon supporters get early access "
-                       @"to experimental tweaks. Auth happens in-app.";
-            }
-            NSDate *last = cyanide_patreon_last_refresh_date();
-            if (last) {
-                NSDateFormatter *df = [[NSDateFormatter alloc] init];
-                df.dateStyle = NSDateFormatterMediumStyle;
-                df.timeStyle = NSDateFormatterShortStyle;
-                return [NSString stringWithFormat:@"Last checked %@", [df stringFromDate:last]];
-            }
-            return nil;
-        }
         return nil;
     }
     NSInteger s = self.underlyingSection;
@@ -5924,7 +5890,6 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section
 {
     if (!self.detailMode) {
-        if ((RootSection)section == RootSectionWarning) return CGFLOAT_MIN;
         if ((RootSection)section == RootSectionChangelog     && settings_changelog_entries().count == 0) return CGFLOAT_MIN;
         if ((RootSection)section == RootSectionTweakBundles  && self.tweakBundleRows.count  == 0) return CGFLOAT_MIN;
         if ((RootSection)section == RootSectionInDev        && self.inDevBundleRows.count  == 0) return CGFLOAT_MIN;
@@ -6184,7 +6149,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     switch (row) {
         case 0:
             cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"at" color:UIColor.systemBlueColor size:29.0];
-            cell.textLabel.text = @"Twitter";
+            cell.textLabel.text = @"Twitter Owner Project";
             cell.detailTextLabel.text = @"@zeroxjf";
             break;
         case 1:
@@ -7420,9 +7385,6 @@ void cyanide_present_contact(UIViewController *host)
 
     if (!self.detailMode) {
         switch ((RootSection)indexPath.section) {
-            case RootSectionWarning:
-                indexPath = [NSIndexPath indexPathForRow:indexPath.row inSection:SectionWarning];
-                break;
             case RootSectionChangelog: {
                 if (!self.changelogExpanded) {
                     return [self buildChangelogCollapsedCellInTableView:tableView];
@@ -7445,12 +7407,6 @@ void cyanide_present_contact(UIViewController *host)
                 return [self buildInDevCellWithRow:self.inDevBundleRows[indexPath.row] tableView:tableView];
             case RootSectionSystemBundles:
                 return [self buildBundleCellWithRow:self.systemBundleRows[indexPath.row] tableView:tableView];
-            case RootSectionPatreon:
-                return [self buildPatreonCellAtRow:indexPath.row tableView:tableView];
-            case RootSectionExperimental:
-                if (!settings_experimental_access_allowed())
-                    return [self buildExperimentalLockedCellInTableView:tableView];
-                return [self buildExperimentalCellInTableView:tableView];
             case RootSectionAbout:
                 return [self buildAboutCellAtRow:indexPath.row tableView:tableView];
             case RootSectionCount:
@@ -8268,8 +8224,6 @@ void cyanide_present_contact(UIViewController *host)
 
     if (!self.detailMode) {
         switch ((RootSection)indexPath.section) {
-            case RootSectionWarning:
-                return;
             case RootSectionChangelog: {
                 if (!self.changelogExpanded) {
                     self.changelogExpanded = YES;
@@ -8302,50 +8256,6 @@ void cyanide_present_contact(UIViewController *host)
                 SettingsViewController *detail = [[SettingsViewController alloc] initWithUnderlyingSection:underlying
                                                                                               bundleTitle:pushTitle];
                 [self.navigationController pushViewController:detail animated:YES];
-                return;
-            }
-            case RootSectionPatreon:
-                [self handlePatreonTapAtRow:indexPath.row];
-                return;
-            case RootSectionExperimental: {
-                if (!settings_experimental_access_allowed()) {
-                    if (cyanide_patreon_is_linked()) {
-                        [[UIApplication sharedApplication] openURL:cyanide_patreon_join_url()
-                                                            options:@{}
-                                                  completionHandler:nil];
-                    } else {
-                        UIAlertController *ac = [UIAlertController
-                            alertControllerWithTitle:@"Member Tier Required"
-                                             message:@"Experimental tweaks are early-access for Member tier supporters on patreon.com/zeroxjf."
-                                      preferredStyle:UIAlertControllerStyleAlert];
-                        __weak typeof(self) weakSelf = self;
-                        [ac addAction:[UIAlertAction actionWithTitle:@"Link Account"
-                                                               style:UIAlertActionStyleDefault
-                                                             handler:^(UIAlertAction *a) {
-                            (void)a;
-                            [weakSelf handlePatreonTapAtRow:0];
-                        }]];
-                        [ac addAction:[UIAlertAction actionWithTitle:@"Sign Up on Patreon"
-                                                               style:UIAlertActionStyleDefault
-                                                             handler:^(UIAlertAction *a) {
-                            (void)a;
-                            [[UIApplication sharedApplication] openURL:cyanide_patreon_join_url()
-                                                               options:@{}
-                                                     completionHandler:nil];
-                        }]];
-                        [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                                               style:UIAlertActionStyleCancel
-                                                             handler:nil]];
-                        [self presentViewController:ac animated:YES completion:nil];
-                    }
-                    return;
-                }
-                UITableViewCell *expCell = [tableView cellForRowAtIndexPath:indexPath];
-                if ([expCell.accessoryView isKindOfClass:[UISwitch class]]) {
-                    UISwitch *sw = (UISwitch *)expCell.accessoryView;
-                    [sw setOn:!sw.isOn animated:YES];
-                    [self experimentalSwitchChanged:sw];
-                }
                 return;
             }
             case RootSectionAbout: {
