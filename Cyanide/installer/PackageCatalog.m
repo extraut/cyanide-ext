@@ -21,14 +21,16 @@ static const NSInteger kSecLayoutExtras     = 12;
 static const NSInteger kSecNanoRegistry     = 13;
 static const NSInteger kSecThemer           = 14;
 static const NSInteger kSecLocationSim      = 15;
+static const NSInteger kSecGravityLite      = 16;
 
 + (NSArray<Package *> *)allPackages
 {
     NSArray<Package *> *full = [self allPackagesIncludingExperimental];
+    BOOL creator = cyanide_is_creator();
+    BOOL experimentalAccess = cyanide_is_patron() || creator;
     BOOL experimentalOn = [[NSUserDefaults standardUserDefaults]
                             boolForKey:kSettingsExperimentalTweaksEnabled]
-                            && cyanide_is_patron();
-    BOOL creator = cyanide_is_creator();
+                            && experimentalAccess;
 
     NSMutableArray<Package *> *out = [NSMutableArray arrayWithCapacity:full.count];
     for (Package *p in full) {
@@ -192,12 +194,38 @@ static const NSInteger kSecLocationSim      = 15;
                                 longDescription:@"Adds extra padding around the home grid and the dock, and scales icons up or down. Stacks on top of SBCustomizer.\n\nDial in left/right/top/bottom padding for the home screen, horizontal padding for the dock, and home/dock icon scale in the Settings tab. Defaults match stock (zero padding, 100% scale).\n\nApplied at Run; not persisted across respring.\n\niOS 18: mutates the SBIconController layout configuration directly (upstream kolbicz path).\niOS 26: walks the live SBIconListView/SBIconView hierarchy and adjusts frames + iconImageInfo per icon (the iOS 26 layout class is read-only). One-shot at Run on iOS 26 — rotation/page swipe may force iOS 26's auto-layout to re-fit, so re-Run if that happens."
                                         version:version
                                          author:@"kolbicz"
-                                       category:@"Home Screen Layout"
+                                      category:@"Home Screen Layout"
                                      symbolName:@"square.dashed.inset.filled"
                                            kind:PackageInstallKindToggle
                                      enabledKey:kSettingsLayoutExtrasEnabled
                                           isNew:YES];
         layoutExtras.settingsSection = kSecLayoutExtras;
+        NSInteger iosMajor = [[NSProcessInfo processInfo] operatingSystemVersion].majorVersion;
+        if (iosMajor >= 26) {
+            layoutExtras.knownIssues = @[
+                @"iOS 26: layout may reset after rotation or page swipe. Re-run to reapply.",
+            ];
+        }
+
+        Package *gravityLite = [[Package alloc] initWithIdentifier:@"com.darksword.gravitylite"
+                                           name:@"Gravity Lite"
+                               shortDescription:@"Make home-screen icons fall with physics"
+                                longDescription:@"Core RemoteCall-only port of Julio Verne's classic Gravity tweak for iOS 26. Applies UIDynamicAnimator gravity, collision bounds, bounce, friction, resistance, optional dock physics, accelerometer steering, shake pulses, restore, and an explosion pulse to the currently visible SpringBoard icon views.\n\nThis is not a full Substrate-style port. Activator/Home-button hooks, drag gestures, and preference-daemon notifications are intentionally left out. Use Settings to tune the core physics and the Restore button to reset the layout."
+                                        version:version
+                                         author:@"Julio Verne / zeroxjf"
+                                       category:@"Beta"
+                                     symbolName:@"arrow.down.circle.fill"
+                                           kind:PackageInstallKindToggle
+                                     enabledKey:kSettingsGravityLiteEnabled
+                                          isNew:YES];
+        gravityLite.settingsSection = kSecGravityLite;
+        gravityLite.unstableWarning = @"Beta: RemoteCall-only physics can be reset by SpringBoard relayouts such as page swipes, rotations, folder transitions, or resprings. Use Restore Icon Layout if icons stay displaced.";
+        gravityLite.knownIssues = @[
+            @"To disable, use the App Switcher to return to Cyanide and deactivate Gravity Lite. There is no other way to stop it right now.",
+            @"Touch input does not register on displaced icons yet. Forwarding taps in this environment is a major WIP.",
+            @"Install is slow as hell. WIP. Cyanide has to capture every visible icon and widget before physics start.",
+            @"Page swipes, folder opens, or SpringBoard relayouts may stop the effect. Run Gravity again.",
+        ];
 
         Package *nanoRegistry = [[Package alloc] initWithIdentifier:@"com.darksword.nanoregistry"
                                            name:@"Watch Pairing Override"
@@ -256,6 +284,7 @@ static const NSInteger kSecLocationSim      = 15;
             statBar,
             sbc,
             layoutExtras,
+            gravityLite,
             powercuff,
 
             disableAppLibrary,

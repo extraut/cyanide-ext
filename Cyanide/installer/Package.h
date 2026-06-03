@@ -76,6 +76,10 @@ typedef NS_ENUM(NSInteger, PackageInstallKind) {
 // Non-creators see the package but cannot queue it.
 @property (nonatomic, assign) BOOL creatorOnly;
 
+// Non-nil means the package detail view shows a prominent "Known Issues" card.
+// Each string is one bullet. Set in PackageCatalog.
+@property (nonatomic, copy, nullable) NSArray<NSString *> *knownIssues;
+
 @property (nonatomic, readonly, assign) BOOL isInstalled;
 @property (nonatomic, readonly, assign) BOOL isQueuedForApply;
 @property (nonatomic, readonly, assign) BOOL isInstallDisabled;

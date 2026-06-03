@@ -51,6 +51,13 @@ extern NSString * const kSettingsAxonLiteEnabled;
 
 extern NSString * const kSettingsTypeBannerEnabled;
 
+extern NSString * const kSettingsGravityLiteEnabled;
+extern NSString * const kSettingsGravityLiteDockEnabled;
+extern NSString * const kSettingsGravityLiteMagnitudePct;
+extern NSString * const kSettingsGravityLiteBouncePct;
+extern NSString * const kSettingsGravityLiteFrictionPct;
+extern NSString * const kSettingsGravityLiteResistancePct;
+
 extern NSString * const kSettingsStageStripEnabled;
 
 extern NSString * const kSettingsLocationSimLatitude;
@@ -94,6 +101,7 @@ BOOL settings_apply_nano_registry_now(BOOL apply);
 BOOL settings_apply_call_recording_sound_disabled(BOOL disabled);
 
 void settings_run_actions(void);
+void settings_run_pending_actions(void);
 void settings_destroy_springboard_remote_call(void);
 void settings_destroy_springboard_remote_call_sync(void);
 void settings_best_effort_termination_cleanup(const char *reason);

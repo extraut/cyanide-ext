@@ -179,7 +179,7 @@ static BOOL PackageCanQueueInstall(Package *package)
 
     if (!hasHeavy) {
         if (needsRunActions) {
-            settings_run_actions();
+            settings_run_pending_actions();
         } else {
             dispatch_async(dispatch_get_main_queue(), ^{
                 [[NSNotificationCenter defaultCenter]
@@ -196,7 +196,7 @@ static BOOL PackageCanQueueInstall(Package *package)
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (needsRunActions) {
-                settings_run_actions();
+                settings_run_pending_actions();
             } else {
                 [[NSNotificationCenter defaultCenter]
                     postNotificationName:kSettingsActionsDidCompleteNotification

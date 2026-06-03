@@ -11,6 +11,7 @@
 #import "LogTextView.h"
 #import <signal.h>
 #import <sys/stat.h>
+#import <sys/utsname.h>
 #import <unistd.h>
 
 @interface AppDelegate ()
@@ -35,21 +36,28 @@ static dispatch_source_t g_sigterm_source;
 - (void)logBootIdentity {
     NSBundle *b = [NSBundle mainBundle];
     NSDictionary *info = b.infoDictionary;
-    NSString *bundleID = info[@"CFBundleIdentifier"] ?: @"?";
     NSString *shortVer = info[@"CFBundleShortVersionString"] ?: @"?";
     NSString *build    = info[@"CFBundleVersion"] ?: @"?";
-    NSString *exePath  = b.executablePath ?: @"?";
-    NSString *bundlePath = b.bundlePath ?: @"?";
-    struct stat st;
-    char mtime[64] = "?";
-    if (stat(exePath.fileSystemRepresentation, &st) == 0) {
-        struct tm tm;
-        localtime_r(&st.st_mtimespec.tv_sec, &tm);
-        strftime(mtime, sizeof(mtime), "%Y-%m-%d %H:%M:%S", &tm);
-    }
-    printf("[BOOT] bundle=%s id=%s version=%s build=%s exe-mtime=%s\n",
-           bundlePath.UTF8String, bundleID.UTF8String,
-           shortVer.UTF8String, build.UTF8String, mtime);
+
+    struct utsname u = {0};
+    const char *machine = "device";
+    if (uname(&u) == 0 && u.machine[0])
+        machine = u.machine;
+    NSString *ios = UIDevice.currentDevice.systemVersion ?: @"?";
+
+    fprintf(stdout,
+        "\n"
+        "     ╭───────────╮\n"
+        "     │ ▄▄▄▄▄▄▄▄▄ │\n"
+        "     ├───────────┤\n"
+        "     │ ░░░░░░░░░ │   C Y A N I D E\n"
+        "     │ ░░░ C ░░░ │   %s (%s)\n"
+        "     │ ░░░░░░░░░ │   %s • iOS %s\n"
+        "     │ ░░░░░░░░░ │\n"
+        "     ╰───────────╯\n"
+        "\n",
+        shortVer.UTF8String, build.UTF8String,
+        machine, ios.UTF8String);
 }
 
 - (void)installTerminationHandlers {

@@ -88,8 +88,6 @@ static int compare_versions(NSString *a, NSString *b)
     }
     self.autoCheckInFlight = YES;
 
-    printf("[UPDATE] checking latest release (current=%s, processFirst=%d, throttleElapsed=%d)\n",
-           self.currentVersion.UTF8String, processNeedsCheck, throttleElapsed);
 
     NSURL *url = [NSURL URLWithString:kReleasesAPI];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
@@ -137,11 +135,8 @@ static int compare_versions(NSString *a, NSString *b)
 
         NSString *latest  = [strongSelf normalizeTag:tag];
         NSString *current = [strongSelf currentVersion];
-        if (compare_versions(latest, current) <= 0) {
-            printf("[UPDATE] already on latest (current=%s latest=%s)\n",
-                   current.UTF8String, latest.UTF8String);
+        if (compare_versions(latest, current) <= 0)
             return;
-        }
 
         NSUserDefaults *d2 = [NSUserDefaults standardUserDefaults];
         NSString *skipped = [d2 stringForKey:kUpdateSkippedVersionKey];

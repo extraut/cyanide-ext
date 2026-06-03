@@ -16,9 +16,14 @@ Avoid vague bullets like "Update settings", "Change project files", or
 
 ## Pending
 
-- [ ] Added a maintained pending/released release-notes workflow that drives GitHub notes and the in-app changelog without falling back to generic commit subjects.
 
 ## Released
+
+### v1.2.0 - 2026-06-03
+
+- [x] Added Gravity Lite with home screen and dock icon physics, tilt control, widget support, and iOS 18/26 compatibility.
+- [x] Polished installer, settings, and log presentation with clearer status text, cleaner startup branding, and a maintained release-notes workflow.
+- [x] Improved tweak activation and cleanup so unchanged tweaks are not reapplied unnecessarily and SpringBoard-backed tweaks deactivate more reliably.
 
 ### v1.1.22 - 2026-06-02
 

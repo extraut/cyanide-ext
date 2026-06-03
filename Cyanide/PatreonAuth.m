@@ -220,7 +220,8 @@ BOOL cyanide_is_patron(void)
 
 BOOL cyanide_is_creator(void)
 {
-    NSString *tier = cyanide_patreon_tier_title();
+    NSDictionary *p = current_payload();
+    NSString *tier = [p[@"tier"] isKindOfClass:[NSString class]] ? p[@"tier"] : nil;
     return [tier isEqualToString:@"Creator"];
 }
 

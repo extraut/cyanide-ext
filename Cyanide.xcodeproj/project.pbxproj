@@ -29,6 +29,9 @@
 		FB4112152FB93FB800461945 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
 		FB4117392FB9597C00461945 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
 		FB45558C2FC7DA4F004466F5 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
+		FB45D79F2FD01E4A00076C12 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
+		FB45DC7F2FD01F6700076C12 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
+		FB45DE262FD022D800076C12 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
 		FB5948FE2FC0DFEA006FB8AE /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
 		FBA008522FB522840080FFE2 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
 		FBA376182FB7FE5600886898 /* ChOma.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = ChOma.xcodeproj; sourceTree = "<group>"; };
@@ -48,6 +51,11 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				tweaks/private/notificationisland.m,
+				tweaks/private/NotificationIslandActivityAttributes.swift,
+				tweaks/private/NotificationIslandLiveActivityBridge.swift,
+				tweaks/private/NotificationIslandWidget/Info.plist,
+				tweaks/private/NotificationIslandWidget/NotificationIslandWidgetBundle.swift,
 				XPF/.gitignore,
 				XPF/.gitmodules,
 				XPF/.vscode/settings.json,
@@ -226,6 +234,27 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		FB45D7D52FD01E4A00076C12 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		FB45DCB52FD01F6700076C12 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		FB45DE5D2FD022D800076C12 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
 		FB5949302FC0DFEA006FB8AE /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -365,8 +394,8 @@
 			projectDirPath = "";
 			projectReferences = (
 				{
-					ProductGroup = FBA376492FB7FE5600886898 /* Products */;
-					ProjectRef = FBA376182FB7FE5600886898 /* ChOma.xcodeproj */;
+					ProductGroup = AA73F7C72F7BC6CB00134C31 /* Products */;
+					ProjectRef = AA73F7982F7BC6CB00134C31 /* ChOma.xcodeproj */;
 				},
 				{
 					ProductGroup = FBEF03792FAC52D5005E14B9 /* Products */;
@@ -397,12 +426,20 @@
 					ProjectRef = FB222AA92FC36B8A001D5118 /* ChOma.xcodeproj */;
 				},
 				{
+					ProductGroup = FB45DE5D2FD022D800076C12 /* Products */;
+					ProjectRef = FB45DE262FD022D800076C12 /* ChOma.xcodeproj */;
+				},
+				{
 					ProductGroup = FB4555C12FC7DA4F004466F5 /* Products */;
 					ProjectRef = FB45558C2FC7DA4F004466F5 /* ChOma.xcodeproj */;
 				},
 				{
 					ProductGroup = FBDA75C92FCB770D00816DA0 /* Products */;
 					ProjectRef = FBDA75932FCB770D00816DA0 /* ChOma.xcodeproj */;
+				},
+				{
+					ProductGroup = FB45D7D52FD01E4A00076C12 /* Products */;
+					ProjectRef = FB45D79F2FD01E4A00076C12 /* ChOma.xcodeproj */;
 				},
 				{
 					ProductGroup = FBA008852FB522840080FFE2 /* Products */;
@@ -429,6 +466,10 @@
 					ProjectRef = FBFECAA52FCF1D67006A02BE /* ChOma.xcodeproj */;
 				},
 				{
+					ProductGroup = FB45DCB52FD01F6700076C12 /* Products */;
+					ProjectRef = FB45DC7F2FD01F6700076C12 /* ChOma.xcodeproj */;
+				},
+				{
 					ProductGroup = FBBF22B02FAE5E7E00AF5849 /* Products */;
 					ProjectRef = FBBF227D2FAE5E7E00AF5849 /* ChOma.xcodeproj */;
 				},
@@ -445,8 +486,8 @@
 					ProjectRef = FB5948FE2FC0DFEA006FB8AE /* ChOma.xcodeproj */;
 				},
 				{
-					ProductGroup = AA73F7C72F7BC6CB00134C31 /* Products */;
-					ProjectRef = AA73F7982F7BC6CB00134C31 /* ChOma.xcodeproj */;
+					ProductGroup = FBA376492FB7FE5600886898 /* Products */;
+					ProjectRef = FBA376182FB7FE5600886898 /* ChOma.xcodeproj */;
 				},
 			);
 			projectRoot = "";
@@ -504,9 +545,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1001022;
+				CURRENT_PROJECT_VERSION = 1002000;
 				DEVELOPMENT_ASSET_PATHS = "";
-				DEVELOPMENT_TEAM = 8NAXVXSYWF;
+				DEVELOPMENT_TEAM = 7LGY4NE2VM;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -532,7 +573,7 @@
 					"$(PROJECT_DIR)/Cyanide/XPF/external/ChOma/external/ios",
 					"$(PROJECT_DIR)/Cyanide/resident/output",
 				);
-				MARKETING_VERSION = 1.1.22;
+				MARKETING_VERSION = 1.2.0;
 				OTHER_CFLAGS = "";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.zeroxjf.ios-cyanide1";
 				PRODUCT_NAME = Cyanide;
@@ -554,9 +595,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1001022;
+				CURRENT_PROJECT_VERSION = 1002000;
 				DEVELOPMENT_ASSET_PATHS = "";
-				DEVELOPMENT_TEAM = 8NAXVXSYWF;
+				DEVELOPMENT_TEAM = 7LGY4NE2VM;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -582,7 +623,7 @@
 					"$(PROJECT_DIR)/Cyanide/XPF/external/ChOma/external/ios",
 					"$(PROJECT_DIR)/Cyanide/resident/output",
 				);
-				MARKETING_VERSION = 1.1.22;
+				MARKETING_VERSION = 1.2.0;
 				OTHER_CFLAGS = "";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.zeroxjf.ios-cyanide1";
 				PRODUCT_NAME = Cyanide;
