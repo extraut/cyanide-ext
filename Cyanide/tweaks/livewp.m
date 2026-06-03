@@ -428,10 +428,13 @@ static void livewp_cleanup(void)
     g_livewp_lock_window = 0;
 }
 
-// Periodic rewind+play so the wallpaper actually loops. actionAtItemEnd:Pause
-// stops the player at duration; the tick notices currentTime >= duration and
-// seeks back to zero, then attach_and_play re-stamps layer positions on any
-// window SpringBoard recycled while we were idle.
+// Periodic rewind so the wallpaper actually loops. actionAtItemEnd:Pause
+// stops the player at duration; the tick notices currentTime >= duration
+// and seeks back to zero, then sends play. We deliberately do NOT call
+// attach_and_play here — that re-stamps setFrame/insertSublayer/setZPosition
+// every 2s and rematerialises CoreAnimation layers under SpringBoard, which
+// is what was crashing SB. Attach is a one-shot operation owned by apply
+// and resume; the tick is read-only on layer tree.
 static void livewp_repair_tick(void)
 {
     if (!g_livewp_configured) return;
@@ -439,7 +442,24 @@ static void livewp_repair_tick(void)
     // is torn down — they'd undo the pause and start decoding frames on a
     // blanked screen.
     if (g_livewp_paused) return;
-    livewp_repair_in_session();
+    if (!r_is_objc_ptr(g_livewp_player) || !r_is_objc_ptr(g_livewp_player_item)) {
+        // SpringBoard recycled under us — bail and let the next resume
+        // rebuild via livewp_repair_in_session's attach path.
+        return;
+    }
+    struct { long long v; long long ts; } dur = {0, 0}, cur = {0, 0};
+    r_msg2_main_struct_ret(g_livewp_player_item, "duration", &dur, sizeof(dur),
+                           NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+    r_msg2_main_struct_ret(g_livewp_player, "currentTime", &cur, sizeof(cur),
+                           NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+    if (cur.v < dur.v || dur.v <= 0) return;
+    // Reached the end. Rewind and replay. Note: we do NOT use
+    // livewp_repair_in_session here on purpose — its attach_and_play tail
+    // touches the layer tree every tick and that is what killed SB.
+    struct { long long v; long long ts; } zero = {0, 0};
+    r_msg2_main_raw(g_livewp_player, "seekToTime:",
+                    &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
+    r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
 }
 
 static void livewp_start_repair_timer(void)
