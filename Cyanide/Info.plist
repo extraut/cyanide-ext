@@ -28,6 +28,8 @@
 	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>LiveWP needs read access to your Photos library so you can pick a video to use as a live wallpaper.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

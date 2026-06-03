@@ -26,6 +26,7 @@
 #import "tweaks/nicebarlite.h"
 #import "tweaks/nsbar.h"
 #import <CoreMotion/CoreMotion.h>
+#import <PhotosUI/PhotosUI.h>
 
 #import <objc/runtime.h>
 #import "DSKeepAlive.h"
@@ -4679,7 +4680,7 @@ static NSString *settings_pretty_date_for_iso(NSString *iso)
     return date ? [out stringFromDate:date] : iso;
 }
 
-@interface SettingsViewController () <UIDocumentPickerDelegate>
+@interface SettingsViewController () <UIDocumentPickerDelegate, PHPickerViewControllerDelegate>
 @property (nonatomic, strong) UISegmentedControl *powercuffSegmented;
 @property (nonatomic, assign) BOOL pendingManualActionsReload;
 @property (nonatomic, assign) BOOL detailMode;
@@ -6291,7 +6292,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
                                            style:UIAlertActionStyleDefault
                                          handler:^(UIAlertAction *a) {
         (void)a;
-        [self presentLiveWPDocumentPickerInternal];
+        [self presentLiveWPPhotosPickerInternal];
     }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"Files & iCloud Drive"
                                            style:UIAlertActionStyleDefault
@@ -6346,6 +6347,22 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
     self.activeDocumentPickerMode = @"livewp";
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+// PHPickerViewController (PhotosUI.framework) shows the Photos library as
+// the primary content — UIDocumentPicker only shows it in a sidebar, which
+// is not what the user expects from a "Pick a video" action.
+- (void)presentLiveWPPhotosPickerInternal
+{
+    PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
+    config.filter = [PHPickerFilter videosFilter];
+    config.selectionLimit = 1;
+    config.preferredAssetRepresentationMode =
+        PHPickerConfigurationAssetRepresentationModeCurrent;
+    PHPickerViewController *picker =
+        [[PHPickerViewController alloc] initWithConfiguration:config];
+    picker.delegate = (id<PHPickerViewControllerDelegate>)self;
     [self presentViewController:picker animated:YES completion:nil];
 }
 
@@ -6683,6 +6700,49 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
             [self presentViewController:ac animated:YES completion:nil];
         });
     });
+}
+
+#pragma mark - PHPickerViewControllerDelegate
+
+- (void)picker:(PHPickerViewController *)picker
+didFinishPicking:(NSArray<PHPickerResult *> *)results
+{
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    PHPickerResult *first = results.firstObject;
+    if (!first || !first.itemProvider) return;
+    NSItemProvider *provider = first.itemProvider;
+    if (![provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"Not a Video"
+                             message:@"Pick a video file from your Photos library."
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"OK"
+                                               style:UIAlertActionStyleDefault
+                                             handler:nil]];
+        [self presentViewController:ac animated:YES completion:nil];
+        return;
+    }
+    // PHPicker hands back a temp URL that lives only inside the picker's
+    // sandbox. Copy it into our Documents/LiveWP/ folder the same way the
+    // document-picker path does so the file is reachable for the
+    // lifetime of the install.
+    [provider loadFileRepresentationForTypeIdentifier:@"public.movie"
+                                    completionHandler:^(NSURL * _Nullable url, NSError * _Nullable err) {
+        if (!url) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *ac = [UIAlertController
+                    alertControllerWithTitle:@"Couldn't Read Video"
+                                     message:err.localizedDescription ?: @"The Photos picker couldn't hand off the video file."
+                              preferredStyle:UIAlertControllerStyleAlert];
+                [ac addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                       style:UIAlertActionStyleDefault
+                                                     handler:nil]];
+                [self presentViewController:ac animated:YES completion:nil];
+            });
+            return;
+        }
+        [self importLiveWPVideoAtURL:url];
+    }];
 }
 
 // "Classic" alternate icon is registered in Info.plist with CFBundleIconFiles

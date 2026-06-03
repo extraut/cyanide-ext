@@ -294,17 +294,21 @@ static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool 
     if (curSuper != winLayer) {
         if (r_is_objc_ptr(curSuper))
             r_msg2_main(layer, "removeFromSuperlayer", 0, 0, 0, 0);
-        // Insert at index 1: above the background wallpaper layer (always
-        // at index 0) but below SBIconView and the rest of the content.
-        // The previous atIndex:0 placed us underneath the wallpaper, so
-        // the stock wallpaper rendered on top during lockscreen pull-down
-        // and the home-screen "icons disappear after unlock" flash was
-        // caused by the layer being reattached at the very top of the
-        // stack on every window transition. UIWindow siblings are still
-        // ordered by UIScreen, so this only affects the content inside
-        // SBCoverSheetWindow / SBHomeScreenWindow.
+        // Insert at index 1 (above the background wallpaper, which is
+        // always at index 0). Then set zPosition to -0.5 so we sit
+        // *between* the wallpaper (typically zPosition = -1) and the
+        // SBIconView / SBLockScreenView content (zPosition = 0). The
+        // previous attempts at atIndex:0 and atIndex:INT_MAX each broke
+        // one of the two windows: atIndex:0 placed us underneath the
+        // wallpaper so the stock wallpaper rendered on top during
+        // lockscreen pull-down; INT_MAX placed us above the icons, so
+        // the home-screen icons disappeared behind the video. -0.5
+        // gives the right visual stacking on iOS 26.
         r_msg2_main(winLayer, "insertSublayer:atIndex:",
                     layer, (uint64_t)1, 0, 0);
+        double z = -0.5;
+        r_msg2_main_raw(layer, "setZPosition:",
+                        &z, sizeof(z), NULL, 0, NULL, 0, NULL, 0);
         if (movedOut) *movedOut = true;
     }
     return true;
