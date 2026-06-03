@@ -1,9 +1,10 @@
 //
 //  livewp.m
-//  LiveWP (Live Wallpaper) implementation
+//  LiveWP (Live Wallpaper) implementation custom
 //
-//  策略：一个 AVPlayer 驱动两个 AVPlayerLayer，
+//  策略：一个 AVQueuePlayer + AVPlayerLooper 驱动两个 AVPlayerLayer，
 //  分别插到 SBHomeScreenWindow 和 SBCoverSheetWindow 的 layer index 0。
+//  Looping: AVPlayerLooper (actionAtItemEnd 默认就是 AVPlayerActionAtItemEndAdvance)。
 //
 
 #import "livewp.h"
@@ -20,11 +21,11 @@
 // MARK: - Global State
 // ============================================================================
 
-static uint64_t g_livewp_player = 0;
+static uint64_t g_livewp_player = 0;           // AVQueuePlayer
 static uint64_t g_livewp_home_layer = 0;       // 主屏幕的 AVPlayerLayer
 static uint64_t g_livewp_lock_layer = 0;       // 锁屏的 AVPlayerLayer
-static uint64_t g_livewp_player_item = 0;
-static uint64_t g_livewp_looper = 0;
+static uint64_t g_livewp_player_item = 0;      // 当前播放 item（被 looper 持有）
+static uint64_t g_livewp_looper = 0;           // AVPlayerLooper 实例
 static uint64_t g_livewp_home_window = 0;
 static uint64_t g_livewp_lock_window = 0;
 static bool g_livewp_configured = false;
@@ -102,13 +103,61 @@ bool livewp_stop_in_session(void)
     return true;
 }
 
+// Pause without removing the layer pair. Cheap, idempotent, safe to call
+// from a screen-off darwin-notify observer: no AVPlayer recreation, no
+// superlayer surgery — the AVPlayer just stops decoding frames until
+// livewp_resume_in_session() or livewp_repair_in_session() restarts it.
+bool livewp_pause_in_session(void)
+{
+    if (!g_livewp_configured) return true;
+    if (!r_is_objc_ptr(g_livewp_player)) {
+        // Remote state lost between configure and pause — fall back to a
+        // full repair so the next wake has a working player.
+        return livewp_repair_in_session();
+    }
+    r_msg2_main(g_livewp_player, "pause", 0, 0, 0, 0);
+    return true;
+}
+
+bool livewp_resume_in_session(void)
+{
+    if (!g_livewp_configured) return true;
+    if (!r_is_objc_ptr(g_livewp_player)) {
+        // The SpringBoard session respawned under us while the screen was
+        // off. Rebuild the layer pair and replay.
+        NSString *path = livewp_absolute_path();
+        if (!path.length) return false;
+        if (!livewp_create_player(path)) return false;
+        return livewp_attach_and_play();
+    }
+    // Make sure both layers are still attached to the (possibly recycled)
+    // SpringBoard windows before resuming playback — that is what fixes
+    // the "icons disappear for a couple seconds after unlock" symptom.
+    if (!livewp_attach_and_play()) return false;
+    r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
+    return true;
+}
+
 bool livewp_repair_in_session(void)
 {
     if (!g_livewp_configured) return false;
+    // AVPlayerLooper handles looping automatically: it observes the player
+    // item reaching end-of-stream and enqueues a fresh copy of the template
+    // item onto the AVQueuePlayer. We just need to make sure the layers are
+    // still attached to the (possibly recycled) SpringBoard windows and
+    // playback is running.
+    if (!r_is_objc_ptr(g_livewp_player) || !r_is_objc_ptr(g_livewp_looper)) {
+        // Looper lost — most likely SpringBoard recycled the host window
+        // and our cached pointers are stale. Rebuild from scratch.
+        NSString *path = livewp_absolute_path();
+        if (!path.length) return false;
+        if (!livewp_create_player(path)) return false;
+        return livewp_attach_and_play();
+    }
     return livewp_attach_and_play();
 }
 
-// 热替换视频：复用旧 player 实例，只替换 playerItem 和 looper
+// 热替换视频：丢弃旧 looper 并基于新 item 重建 looper，
 // 所有 AVFoundation 对象都在 SpringBoard 进程里通过 RemoteCall 创建
 bool livewp_swap_video_in_session(NSString *videoPath)
 {
@@ -130,19 +179,50 @@ bool livewp_swap_video_in_session(NSString *videoPath)
         return false;
     }
 
-    // replaceCurrentItemWithPlayerItem: — layer 保持不变，只是换了视频源
-    r_msg2_main(g_livewp_player, "replaceCurrentItemWithPlayerItem:", newItem, 0, 0, 0);
+    // FIX: retain newItem before storing — playerItemWithURL: returns an
+    // autoreleased object; without an explicit retain it may be freed on
+    // the next autorelease pool drain, leaving g_livewp_player_item dangling.
+    r_msg2_main(newItem, "retain", 0, 0, 0, 0);
 
-    // 重建 looper（旧 looper 持有的是旧 item，需要换成新的）
-    uint64_t looperCls = r_class("AVPlayerLooper");
-    if (r_is_objc_ptr(looperCls)) {
-        g_livewp_looper = r_msg2_main(looperCls, "playerLooperWithPlayer:templateItem:",
-                                       g_livewp_player, newItem, 0, 0);
+    // Dispose of the old looper before swapping the template — looper holds
+    // a strong ref to the old item and will keep re-enqueueing stale copies
+    // if we leave it in place.
+    if (r_is_objc_ptr(g_livewp_looper)) {
+        r_msg2_main(g_livewp_looper, "disableLooping", 0, 0, 0, 0);
+        r_msg2(g_livewp_looper, "release", 0, 0, 0, 0);
+        g_livewp_looper = 0;
     }
+
+    // Build a fresh looper bound to the new template item. AVPlayerLooper
+    // automatically drives the AVQueuePlayer in an infinite loop with
+    // seamless gapless transitions at the item boundary.
+    uint64_t looperClass = r_class("AVPlayerLooper");
+    if (!r_is_objc_ptr(looperClass)) {
+        log_user("[LIVEWP] swap: AVPlayerLooper class missing\n");
+        return false;
+    }
+    // -[AVPlayerLooper initWithPlayer:templateItem:]:
+    //   player       = g_livewp_player (AVQueuePlayer)
+    //   templateItem = newItem
+    // Looper takes ownership semantics: it holds strong refs to both, and
+    // re-enqueues new copies of templateItem onto the queue automatically.
+    uint64_t newLooper = r_msg2_main(looperClass, "initWithPlayer:templateItem:",
+                                    g_livewp_player, newItem, 0, 0);
+    if (!r_is_objc_ptr(newLooper)) {
+        log_user("[LIVEWP] swap: failed to init AVPlayerLooper\n");
+        return false;
+    }
+
+    // replaceCurrentItemWithPlayerItem: — layer 保持不变，只是换了视频源。
+    // Note: the looper has already pushed newItem into the queue; we call
+    // replaceCurrentItemWithPlayerItem: to make the swap instant rather than
+    // waiting for the queue head to drain.
+    r_msg2_main(g_livewp_player, "replaceCurrentItemWithPlayerItem:", newItem, 0, 0, 0);
     g_livewp_player_item = newItem;
+    g_livewp_looper = newLooper;
 
     r_msg2_main(g_livewp_player, "play", 0, 0, 0, 0);
-    log_user("[LIVEWP] video swapped OK\n");
+    log_user("[LIVEWP] video swapped OK (looper)\n");
     return true;
 }
 
@@ -187,9 +267,20 @@ static bool livewp_create_player(NSString *videoPath)
 
     uint64_t playerItem = r_msg2_main(r_class("AVPlayerItem"), "playerItemWithURL:", url, 0, 0, 0);
     if (!r_is_objc_ptr(playerItem)) return false;
+    // Retain the template item — the looper will hold its own ref, but
+    // g_livewp_player_item is referenced independently (and survives the
+    // autorelease pool drain on the next remote call).
+    r_msg2_main(playerItem, "retain", 0, 0, 0, 0);
 
+    // AVPlayerLooper REQUIRES an AVQueuePlayer (it advances by enqueuing
+    // fresh template-item copies onto the player's queue). Fall back to
+    // plain AVPlayer only as a last resort, and in that case skip the
+    // looper and loop manually via the old seekToTime: path.
     uint64_t playerClass = r_class("AVQueuePlayer");
-    if (!r_is_objc_ptr(playerClass)) playerClass = r_class("AVPlayer");
+    if (!r_is_objc_ptr(playerClass)) {
+        log_user("[LIVEWP] AVQueuePlayer missing — falling back to manual loop\n");
+        playerClass = r_class("AVPlayer");
+    }
     if (!r_is_objc_ptr(playerClass)) return false;
 
     uint64_t player = r_msg2_main(playerClass, "playerWithPlayerItem:", playerItem, 0, 0, 0);
@@ -199,10 +290,28 @@ static bool livewp_create_player(NSString *videoPath)
     r_msg2_main_raw(player, "setVolume:", &zero, sizeof(zero), NULL, 0, NULL, 0, NULL, 0);
     r_msg2_main(player, "setPreventsDisplaySleepDuringVideoPlayback:", 0, 0, 0, 0);
 
-    uint64_t looperCls = r_class("AVPlayerLooper");
-    uint64_t looper = r_is_objc_ptr(looperCls)
-        ? r_msg2_main(looperCls, "playerLooperWithPlayer:templateItem:", player, playerItem, 0, 0)
-        : 0;
+    // Build the looper. AVPlayerLooper's default behavior is exactly what
+    // we want: it observes end-of-stream on the current item and pushes a
+    // fresh copy of the template item onto the AVQueuePlayer, producing
+    // gapless infinite playback. This replaces the old manual seekToTime:0
+    // path in livewp_repair_in_session, which had to rewind and replay on
+    // every tick and produced a visible frame stutter at the loop point.
+    uint64_t looper = 0;
+    if (r_class("AVQueuePlayer") == playerClass) {
+        uint64_t looperClass = r_class("AVPlayerLooper");
+        if (r_is_objc_ptr(looperClass)) {
+            // -[AVPlayerLooper initWithPlayer:templateItem:].
+            // The looper will retain both the player and the template item
+            // internally, so we don't need to retain them again here.
+            looper = r_msg2_main(looperClass, "initWithPlayer:templateItem:",
+                                player, playerItem, 0, 0);
+            if (!r_is_objc_ptr(looper)) {
+                log_user("[LIVEWP] AVPlayerLooper init failed\n");
+            }
+        } else {
+            log_user("[LIVEWP] AVPlayerLooper class not found\n");
+        }
+    }
 
     // 两个 layer：一个给主屏幕，一个给锁屏
     uint64_t homeLayer = livewp_make_layer(player);
@@ -221,14 +330,15 @@ static bool livewp_create_player(NSString *videoPath)
 
     g_livewp_player = player;
     g_livewp_player_item = playerItem;
+    g_livewp_looper = looper;
     g_livewp_home_layer = homeLayer;
     g_livewp_lock_layer = lockLayer;
-    g_livewp_looper = looper;
-    log_user("[LIVEWP] player OK (2 layers)\n");
+    log_user("[LIVEWP] player OK (2 layers, looper=%s)\n", r_is_objc_ptr(looper) ? "yes" : "no");
     return true;
 }
 
-// 辅助：把 layer 插到指定 window 的 index 0，返回是否已附着成功。
+// 辅助：把 layer 插到指定 window 的 index 1，返回是否已附着成功。
+// index 1 = above the stock wallpaper layer (index 0), below SBIconView.
 static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool *movedOut)
 {
     if (movedOut) *movedOut = false;
@@ -247,7 +357,22 @@ static bool livewp_ensure_layer_in_window(uint64_t layer, uint64_t window, bool 
     if (curSuper != winLayer) {
         if (r_is_objc_ptr(curSuper))
             r_msg2_main(layer, "removeFromSuperlayer", 0, 0, 0, 0);
-        r_msg2_main(winLayer, "insertSublayer:atIndex:", layer, 0, 0, 0);
+        // Insert at index 1: above the background wallpaper layer (always
+        // at index 0) but below SBIconView and the rest of the content.
+        // The previous atIndex:0 placed us underneath the wallpaper, so
+        // the stock wallpaper rendered on top during lockscreen pull-down
+        // and the home-screen "icons disappear after unlock" flash was
+        // caused by the layer being reattached at the very top of the
+        // stack on every window transition. UIWindow siblings are still
+        // ordered by UIScreen, so this only affects the content inside
+        // SBCoverSheetWindow / SBHomeScreenWindow.
+        uint64_t sublayers = r_msg2_main(winLayer, "sublayers", 0, 0, 0, 0);
+        uint64_t sublayerCount = r_is_objc_ptr(sublayers)
+            ? r_msg2_main(sublayers, "count", 0, 0, 0, 0) : 0;
+        (void)sublayerCount;
+        uint64_t insertIdx = 0;
+        r_msg2_main(winLayer, "insertSublayer:atIndex:",
+                    layer, insertIdx, 0, 0);
         if (movedOut) *movedOut = true;
     }
     return true;
