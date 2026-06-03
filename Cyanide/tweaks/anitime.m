@@ -121,11 +121,11 @@ static uint64_t anitime_find_cover_sheet_window(void)
     if (!r_is_objc_ptr(app)) return 0;
     uint64_t windows = r_msg2_main(app, "windows", 0, 0, 0, 0);
     if (!r_is_objc_ptr(windows)) {
-        return r_msg2_main(app, "keyWindow", 0, 0, 0);
+        return r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
     }
-    uint64_t count = r_msg2_main(windows, "count", 0, 0, 0);
+    uint64_t count = r_msg2_main(windows, "count", 0, 0, 0, 0);
     if (count == 0 || count > 32) {
-        return r_msg2_main(app, "keyWindow", 0, 0, 0);
+        return r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
     }
     uint64_t csClass = r_class("SBCoverSheetWindow");
     for (uint64_t i = 0; i < count; i++) {
@@ -136,7 +136,7 @@ static uint64_t anitime_find_cover_sheet_window(void)
             return w;
         }
     }
-    return r_msg2_main(app, "keyWindow", 0, 0, 0);
+    return r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
 }
 
 // Recursive subview walk for the lock-screen clock view.
@@ -163,9 +163,9 @@ static uint64_t anitime_walk_for_clock_view(uint64_t view, int depth, int *visit
         }
     }
 
-    uint64_t subs = r_msg2_main(view, "subviews", 0, 0, 0);
+    uint64_t subs = r_msg2_main(view, "subviews", 0, 0, 0, 0);
     if (!r_is_objc_ptr(subs)) return 0;
-    uint64_t cnt = r_msg2_main(subs, "count", 0, 0, 0);
+    uint64_t cnt = r_msg2_main(subs, "count", 0, 0, 0, 0);
     if (cnt == 0 || cnt > 256) return 0;
     for (uint64_t i = 0; i < cnt; i++) {
         uint64_t sub = r_msg2_main(subs, "objectAtIndex:", i, 0, 0, 0);
@@ -203,7 +203,7 @@ static uint64_t anitime_load_named_gif_as_remote_uiimage(const char *name)
     if (!scratch) return 0;
     remote_write(scratch, bytes.bytes, bytes.length);
 
-    uint64_t alloc = r_msg2_main(gAniTimeNSDataClass, "alloc", 0, 0, 0);
+    uint64_t alloc = r_msg2_main(gAniTimeNSDataClass, "alloc", 0, 0, 0, 0);
     if (!r_is_objc_ptr(alloc)) {
         r_dlsym_call(R_TIMEOUT, "free", scratch, 0, 0, 0, 0, 0, 0, 0);
         return 0;
@@ -216,7 +216,7 @@ static uint64_t anitime_load_named_gif_as_remote_uiimage(const char *name)
 
     uint64_t image = r_msg2_main(gAniTimeUIImageClass, "imageWithData:", nsData, 0, 0, 0);
 
-    r_msg2_main(nsData, "release", 0, 0, 0);
+    r_msg2_main(nsData, "release", 0, 0, 0, 0);
     r_dlsym_call(R_TIMEOUT, "free", scratch, 0, 0, 0, 0, 0, 0, 0);
 
     return r_is_objc_ptr(image) ? image : 0;
@@ -233,14 +233,14 @@ static void anitime_load_all_slot_images(void)
         snprintf(name, sizeof(name), "%d", d);
         uint64_t img = anitime_load_named_gif_as_remote_uiimage(name);
         if (r_is_objc_ptr(img)) {
-            gAniTimeSlotImages[d] = r_msg2_main(img, "retain", 0, 0, 0);
+            gAniTimeSlotImages[d] = r_msg2_main(img, "retain", 0, 0, 0, 0);
         } else {
             gAniTimeSlotImages[d] = 0;
         }
     }
     uint64_t colonImg = anitime_load_named_gif_as_remote_uiimage(kAniTimeColonResourceName);
     if (r_is_objc_ptr(colonImg)) {
-        gAniTimeSlotImages[kAniTimeDigitCount] = r_msg2_main(colonImg, "retain", 0, 0, 0);
+        gAniTimeSlotImages[kAniTimeDigitCount] = r_msg2_main(colonImg, "retain", 0, 0, 0, 0);
     } else {
         gAniTimeSlotImages[kAniTimeDigitCount] = 0;
     }
@@ -255,16 +255,16 @@ static uint64_t anitime_ensure_container(void)
     if (!r_is_objc_ptr(gAniTimeUIViewClass)) return 0;
 
     if (r_is_objc_ptr(gAniTimeContainer)) {
-        uint64_t super = r_msg2_main(gAniTimeContainer, "superview", 0, 0, 0);
+        uint64_t super = r_msg2_main(gAniTimeContainer, "superview", 0, 0, 0, 0);
         if (r_is_objc_ptr(super)) return gAniTimeContainer;
-        r_msg2_main(gAniTimeContainer, "removeFromSuperview", 0, 0, 0);
-        r_msg2_main(gAniTimeContainer, "release", 0, 0, 0);
+        r_msg2_main(gAniTimeContainer, "removeFromSuperview", 0, 0, 0, 0);
+        r_msg2_main(gAniTimeContainer, "release", 0, 0, 0, 0);
         gAniTimeContainer = 0;
     }
 
-    uint64_t alloc = r_msg2_main(gAniTimeUIViewClass, "alloc", 0, 0, 0);
+    uint64_t alloc = r_msg2_main(gAniTimeUIViewClass, "alloc", 0, 0, 0, 0);
     if (!r_is_objc_ptr(alloc)) return 0;
-    uint64_t container = r_msg2_main(alloc, "init", 0, 0, 0);
+    uint64_t container = r_msg2_main(alloc, "init", 0, 0, 0, 0);
     if (!r_is_objc_ptr(container)) return 0;
 
     // Match the clock view's bounds.
@@ -277,12 +277,12 @@ static uint64_t anitime_ensure_container(void)
 
     uint64_t UIColor = r_class("UIColor");
     if (r_is_objc_ptr(UIColor)) {
-        uint64_t clear = r_msg2_main(UIColor, "clearColor", 0, 0, 0);
+        uint64_t clear = r_msg2_main(UIColor, "clearColor", 0, 0, 0, 0);
         if (r_is_objc_ptr(clear)) {
             r_msg2_main(container, "setBackgroundColor:", clear, 0, 0, 0);
         }
     }
-    r_msg2_main(container, "setUserInteractionEnabled:", 0, 0, 0);
+    r_msg2_main(container, "setUserInteractionEnabled:", 0, 0, 0, 0);
 
     // Attach as a sibling of the system clock (so dragging the lock sheet
     // moves the overlay with it).
@@ -390,8 +390,8 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
         printf("[ANITIME] cover sheet window not found\n");
         return false;
     }
-    uint64_t rvc = r_msg2_main(win, "rootViewController", 0, 0, 0);
-    uint64_t rootView = r_is_objc_ptr(rvc) ? r_msg2_main(rvc, "view", 0, 0, 0) : 0;
+    uint64_t rvc = r_msg2_main(win, "rootViewController", 0, 0, 0, 0);
+    uint64_t rootView = r_is_objc_ptr(rvc) ? r_msg2_main(rvc, "view", 0, 0, 0, 0) : 0;
     if (!r_is_objc_ptr(rootView)) {
         rootView = r_msg2_main(win, "view", 0, 0, 0);
     }
@@ -429,9 +429,9 @@ bool anitime_apply_in_session(AniTimeConfig cfg, AniTimeFormat fmt)
 
         uint64_t iv = gAniTimeSlotViews[i];
         if (!r_is_objc_ptr(iv)) {
-            uint64_t alloc = r_msg2_main(gAniTimeUIImageViewClass, "alloc", 0, 0, 0);
+            uint64_t alloc = r_msg2_main(gAniTimeUIImageViewClass, "alloc", 0, 0, 0, 0);
             if (!r_is_objc_ptr(alloc)) continue;
-            iv = r_msg2_main(alloc, "init", 0, 0, 0);
+            iv = r_msg2_main(alloc, "init", 0, 0, 0, 0);
             if (!r_is_objc_ptr(iv)) continue;
             r_msg2_main(container, "addSubview:", iv, 0, 0, 0);
             gAniTimeSlotViews[i] = iv;
